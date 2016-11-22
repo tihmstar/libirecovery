@@ -15,5 +15,5 @@ libirecovery_la_LDFLAGS = $(AM_LDFLAGS) -version-info $(LIBIRECOVERY_SO_VERSION)
 libirecovery_la_SOURCES = libirecovery.c
 
 if WIN32
-libirecovery_la_LDFLAGS += -avoid-version
+libirecovery_la_LDFLAGS += -avoid-version -ltermcap
 endif
