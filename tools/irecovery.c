@@ -2,6 +2,7 @@
  * irecovery.c
  * Software frontend for iBoot/iBSS communication with iOS devices
  *
+ * Copyright (c) 2012-2019 Nikias Bassen <nikias@gmx.li>
  * Copyright (c) 2012-2015 Martin Szulecki <martin.szulecki@libimobiledevice.org>
  * Copyright (c) 2010-2011 Chronic-Dev Team
  * Copyright (c) 2010-2011 Joshua Hill
@@ -140,6 +141,7 @@ static void print_device_info(irecv_client_t client)
 		printf("CPFM: %02x\n", devinfo->cpfm);
 		printf("SCEP: %02x\n", devinfo->scep);
 		printf("IBFL: %02x\n", devinfo->ibfl);
+		printf("SRTG: %s\n", (devinfo->srtg) ? devinfo->srtg : "N/A");
 		printf("SRNM: %s\n", (devinfo->srnm) ? devinfo->srnm : "N/A");
 		printf("IMEI: %s\n", (devinfo->imei) ? devinfo->imei : "N/A");
 		printf("NONC: ");
@@ -156,6 +158,14 @@ static void print_device_info(irecv_client_t client)
 			printf("N/A");
 		}
 		printf("\n");
+		char* p = strstr(devinfo->serial_string, "PWND:[");
+		if (p) {
+			p+=6;
+			char* pend = strchr(p, ']');
+			if (pend) {
+				printf("PWND: %.*s\n", (int)(pend-p), p);
+			}
+		}
 	} else {
 		printf("Could not get device info?!\n");
 	}
@@ -298,8 +308,7 @@ int postcommand_cb(irecv_client_t client, const irecv_event_t* event) {
 		}
 	}
 
-	if (command)
-		free(command);
+	free(command);
 
 	return 0;
 }
@@ -348,7 +357,7 @@ static void print_usage(int argc, char **argv) {
 	printf("Usage: %s [OPTIONS]\n", (name ? name + 1: argv[0]));
 	printf("Interact with an iOS device in DFU or recovery mode.\n\n");
 	printf("options:\n");
-	printf("  -i ECID\tconnect to specific device by its hexadecimal ECID\n");
+	printf("  -i ECID\tconnect to specific device by its ECID\n");
 	printf("  -c CMD\trun CMD on device\n");
 	printf("  -m\t\tprint current device mode\n");
 	printf("  -f FILE\tsend file to device\n");
@@ -386,7 +395,7 @@ int main(int argc, char* argv[]) {
 			case 'i':
 				if (optarg) {
 					char* tail = NULL;
-					ecid = strtoull(optarg, &tail, 16);
+					ecid = strtoull(optarg, &tail, 0);
 					if (tail && (tail[0] != '\0')) {
 						ecid = 0;
 					}
@@ -454,17 +463,22 @@ int main(int argc, char* argv[]) {
 	if (verbose)
 		irecv_set_debug_level(verbose);
 
-	irecv_init();
 	irecv_client_t client = NULL;
 	for (i = 0; i <= 5; i++) {
 		debug("Attempting to connect... \n");
 
-		if (irecv_open_with_ecid(&client, ecid) != IRECV_E_SUCCESS)
+		irecv_error_t err = irecv_open_with_ecid(&client, ecid);
+		if (err == IRECV_E_UNSUPPORTED) {
+			fprintf(stderr, "ERROR: %s\n", irecv_strerror(err));
+			return -1;
+		}
+		else if (err != IRECV_E_SUCCESS)
 			sleep(1);
 		else
 			break;
 
 		if (i == 5) {
+			fprintf(stderr, "ERROR: %s\n", irecv_strerror(err));
 			return -1;
 		}
 	}
@@ -559,7 +573,6 @@ int main(int argc, char* argv[]) {
 	}
 
 	irecv_close(client);
-	irecv_exit();
 
 	return 0;
 }

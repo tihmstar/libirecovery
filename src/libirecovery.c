@@ -2,6 +2,7 @@
  * libirecovery.c
  * Communication to iBoot/iBSS on Apple iOS devices via USB
  *
+ * Copyright (c) 2011-2019 Nikias Bassen <nikias@gmx.li>
  * Copyright (c) 2012-2015 Martin Szulecki <martin.szulecki@libimobiledevice.org>
  * Copyright (c) 2010 Chronic-Dev Team
  * Copyright (c) 2010 Joshua Hill
@@ -30,9 +31,14 @@
 #include <unistd.h>
 #include <sys/stat.h>
 
+#ifndef USE_DUMMY
 #ifndef WIN32
 #ifndef HAVE_IOKIT
 #include <libusb.h>
+#include <pthread.h>
+#if (defined(LIBUSB_API_VERSION) && (LIBUSB_API_VERSION >= 0x01000102)) || (defined(LIBUSBX_API_VERSION) && (LIBUSBX_API_VERSION >= 0x01000102))
+#define HAVE_LIBUSB_HOTPLUG_API 1
+#endif
 #else
 #include <CoreFoundation/CoreFoundation.h>
 #include <IOKit/usb/IOUSBLib.h>
@@ -51,6 +57,7 @@
 #define sleep(n) Sleep(1000 * n)
 #endif
 #endif
+#endif
 
 #ifdef WIN32
 #define IRECV_API __declspec( dllexport )
@@ -63,6 +70,8 @@
 #endif
 
 #include "libirecovery.h"
+#include "utils.h"
+#include "thread.h"
 
 struct irecv_client_private {
 	int debug;
@@ -71,6 +80,7 @@ struct irecv_client_private {
 	int usb_alt_interface;
 	unsigned int mode;
 	struct irecv_device_info device_info;
+#ifndef USE_DUMMY
 #ifndef WIN32
 #ifndef HAVE_IOKIT
 	libusb_device_handle* handle;
@@ -91,6 +101,7 @@ struct irecv_client_private {
 	irecv_event_cb_t precommand_callback;
 	irecv_event_cb_t postcommand_callback;
 	irecv_event_cb_t disconnected_callback;
+#endif
 };
 
 #define USB_TIMEOUT 10000
@@ -100,83 +111,140 @@ struct irecv_client_private {
 #define debug(...) if(libirecovery_debug) fprintf(stderr, __VA_ARGS__)
 
 static int libirecovery_debug = 0;
+#ifndef USE_DUMMY
 #ifndef WIN32
 #ifndef HAVE_IOKIT
 static libusb_context* libirecovery_context = NULL;
 #endif
 #endif
+#endif
 
 static struct irecv_device irecv_devices[] = {
-	{"iPhone1,1",  "m68ap", 0x00, 0x8900 },
-	{"iPhone1,2",  "n82ap", 0x04, 0x8900 },
-	{"iPhone2,1",  "n88ap", 0x00, 0x8920 },
-	{"iPhone3,1",  "n90ap", 0x00, 0x8930 },
-	{"iPhone3,2", "n90bap", 0x04, 0x8930 },
-	{"iPhone3,3",  "n92ap", 0x06, 0x8930 },
-	{"iPhone4,1",  "n94ap", 0x08, 0x8940 },
-	{"iPhone5,1",  "n41ap", 0x00, 0x8950 },
-	{"iPhone5,2",  "n42ap", 0x02, 0x8950 },
-	{"iPhone5,3",  "n48ap", 0x0a, 0x8950 },
-	{"iPhone5,4",  "n49ap", 0x0e, 0x8950 },
-	{"iPhone6,1",  "n51ap", 0x00, 0x8960 },
-	{"iPhone6,2",  "n53ap", 0x02, 0x8960 },
-	{"iPhone7,1",  "n56ap", 0x04, 0x7000 },
-	{"iPhone7,2",  "n61ap", 0x06, 0x7000 },
-	{"iPhone8,1",  "n71ap", 0x04, 0x8000 },
-	{"iPhone8,1", "n71map", 0x04, 0x8003 },
-	{"iPhone8,2",  "n66ap", 0x06, 0x8000 },
-	{"iPhone8,2", "n66map", 0x06, 0x8003 },
-	{"iPhone8,4",  "n69ap", 0x02, 0x8003 },
-	{"iPhone8,4", "n69uap", 0x02, 0x8000 },
-	{"iPhone9,1",  "d10ap", 0x08, 0x8010 },
-	{"iPhone9,2",  "d11ap", 0x0a, 0x8010 },
-	{"iPhone9,3", "d101ap", 0x0c, 0x8010 },
-	{"iPhone9,4", "d111ap", 0x0e, 0x8010 },
-	{"iPod1,1",    "n45ap", 0x02, 0x8900 },
-	{"iPod2,1",    "n72ap", 0x00, 0x8920 },
-	{"iPod3,1",    "n18ap", 0x02, 0x8922 },
-	{"iPod4,1",    "n81ap", 0x08, 0x8930 },
-	{"iPod5,1",    "n78ap", 0x00, 0x8942 },
-	{"iPod7,1",   "n102ap", 0x10, 0x7000 },
-	{"iPad1,1",    "k48ap", 0x02, 0x8930 },
-	{"iPad2,1",    "k93ap", 0x04, 0x8940 },
-	{"iPad2,2",    "k94ap", 0x06, 0x8940 },
-	{"iPad2,3",    "k95ap", 0x02, 0x8940 },
-	{"iPad2,4",   "k93aap", 0x06, 0x8942 },
-	{"iPad2,5",   "p105ap", 0x0a, 0x8942 },
-	{"iPad2,6",   "p106ap", 0x0c, 0x8942 },
-	{"iPad2,7",   "p107ap", 0x0e, 0x8942 },
-	{"iPad3,1",     "j1ap", 0x00, 0x8945 },
-	{"iPad3,2",     "j2ap", 0x02, 0x8945 },
-	{"iPad3,3",    "j2aap", 0x04, 0x8945 },
-	{"iPad3,4",   "p101ap", 0x00, 0x8955 },
-	{"iPad3,5",   "p102ap", 0x02, 0x8955 },
-	{"iPad3,6",   "p103ap", 0x04, 0x8955 },
-	{"iPad4,1",    "j71ap", 0x10, 0x8960 },
-	{"iPad4,2",    "j72ap", 0x12, 0x8960 },
-	{"iPad4,4",    "j85ap", 0x0a, 0x8960 },
-	{"iPad4,5",    "j86ap", 0x0c, 0x8960 },
-	{"iPad4,6",    "j87ap", 0x0e, 0x8960 },
-	{"iPad4,7",   "j85map", 0x32, 0x8960 },
-	{"iPad4,8",   "j86map", 0x34, 0x8960 },
-	{"iPad4,9",   "j87map", 0x36, 0x8960 },
-	{"iPad5,1",    "j96ap", 0x08, 0x7000 },
-	{"iPad5,2",    "j97ap", 0x0A, 0x7000 },
-	{"iPad5,3",    "j81ap", 0x06, 0x7001 },
-	{"iPad5,4",    "j82ap", 0x02, 0x7001 },
-	{"iPad6,3",   "j127ap", 0x08, 0x8001 },
-	{"iPad6,4",   "j128ap", 0x0a, 0x8001 },
-	{"iPad6,7",   "j98aap", 0x10, 0x8001 },
-	{"iPad6,8",   "j99aap", 0x12, 0x8001 },
-	{"AppleTV2,1", "k66ap", 0x10, 0x8930 },
-	{"AppleTV3,1", "j33ap", 0x08, 0x8942 },
-	{"AppleTV3,2","j33iap", 0x00, 0x8947 },
-    {"AppleTV5,3","j42dap", 0x34, 0x7000 },
+	/* iPhone */
+	{ "iPhone1,1",   "m68ap",    0x00, 0x8900, "iPhone 2G" },
+	{ "iPhone1,2",   "n82ap",    0x04, 0x8900, "iPhone 3G" },
+	{ "iPhone2,1",   "n88ap",    0x00, 0x8920, "iPhone 3Gs" },
+	{ "iPhone3,1",   "n90ap",    0x00, 0x8930, "iPhone 4 (GSM)" },
+	{ "iPhone3,2",   "n90bap",   0x04, 0x8930, "iPhone 4 (GSM) R2 2012" },
+	{ "iPhone3,3",   "n92ap",    0x06, 0x8930, "iPhone 4 (CDMA)" },
+	{ "iPhone4,1",   "n94ap",    0x08, 0x8940, "iPhone 4s" },
+	{ "iPhone5,1",   "n41ap",    0x00, 0x8950, "iPhone 5 (GSM)" },
+	{ "iPhone5,2",   "n42ap",    0x02, 0x8950, "iPhone 5 (Global)" },
+	{ "iPhone5,3",   "n48ap",    0x0a, 0x8950, "iPhone 5c (GSM)" },
+	{ "iPhone5,4",   "n49ap",    0x0e, 0x8950, "iPhone 5c (Global)" },
+	{ "iPhone6,1",   "n51ap",    0x00, 0x8960, "iPhone 5s (GSM)" },
+	{ "iPhone6,2",   "n53ap",    0x02, 0x8960, "iPhone 5s (Global)" },
+	{ "iPhone7,1",   "n56ap",    0x04, 0x7000, "iPhone 6 Plus" },
+	{ "iPhone7,2",   "n61ap",    0x06, 0x7000, "iPhone 6" },
+	{ "iPhone8,1",   "n71ap",    0x04, 0x8000, "iPhone 6s" },
+	{ "iPhone8,1",   "n71map",   0x04, 0x8003, "iPhone 6s" },
+	{ "iPhone8,2",   "n66ap",    0x06, 0x8000, "iPhone 6s Plus" },
+	{ "iPhone8,2",   "n66map",   0x06, 0x8003, "iPhone 6s Plus" },
+	{ "iPhone8,4",   "n69ap",    0x02, 0x8003, "iPhone SE" },
+	{ "iPhone8,4",   "n69uap",   0x02, 0x8000, "iPhone SE" },
+	{ "iPhone9,1",   "d10ap",    0x08, 0x8010, "iPhone 7 (Global)" },
+	{ "iPhone9,2",   "d11ap",    0x0a, 0x8010, "iPhone 7 Plus (Global)" },
+	{ "iPhone9,3",   "d101ap",   0x0c, 0x8010, "iPhone 7 (GSM)" },
+	{ "iPhone9,4",   "d111ap",   0x0e, 0x8010, "iPhone 7 Plus (GSM)" },
+	{ "iPhone10,1",  "d20ap",    0x02, 0x8015, "iPhone 8 (Global)" },
+	{ "iPhone10,2",  "d21ap",    0x04, 0x8015, "iPhone 8 Plus (Global)" },
+	{ "iPhone10,3",  "d22ap",    0x06, 0x8015, "iPhone X (Global)" },
+	{ "iPhone10,4",  "d201ap",   0x0a, 0x8015, "iPhone 8 (GSM)" },
+	{ "iPhone10,5",  "d211ap",   0x0c, 0x8015, "iPhone 8 Plus (GSM)" },
+	{ "iPhone10,6",  "d221ap",   0x0e, 0x8015, "iPhone X (GSM)" },
+	{ "iPhone11,2",  "d321ap",   0x0e, 0x8020, "iPhone XS" },
+	{ "iPhone11,4",  "d331ap",   0x0a, 0x8020, "iPhone XS Max (China)" },
+	{ "iPhone11,6",  "d331pap",  0x1a, 0x8020, "iPhone XS Max" },
+	{ "iPhone11,8",  "n841ap",   0x0c, 0x8020, "iPhone XR" },
+	{ "iPhone12,1",  "n104ap",   0x04, 0x8030, "iPhone 11" },
+	{ "iPhone12,3",  "d421ap",   0x06, 0x8030, "iPhone 11 Pro" },
+	{ "iPhone12,5",  "d431ap",   0x02, 0x8030, "iPhone 11 Pro Max" },
+	/* iPod */
+	{ "iPod1,1",     "n45ap",    0x02, 0x8900, "iPod Touch (1st gen)" },
+	{ "iPod2,1",     "n72ap",    0x00, 0x8720, "iPod Touch (2nd gen)" },
+	{ "iPod3,1",     "n18ap",    0x02, 0x8922, "iPod Touch (3rd gen)" },
+	{ "iPod4,1",     "n81ap",    0x08, 0x8930, "iPod Touch (4th gen)" },
+	{ "iPod5,1",     "n78ap",    0x00, 0x8942, "iPod Touch (5th gen)" },
+	{ "iPod7,1",     "n102ap",   0x10, 0x7000, "iPod Touch (6th gen)" },
+	{ "iPod9,1",     "n112ap",   0x16, 0x8010, "iPod Touch (7th gen)" },
+	/* iPad */
+	{ "iPad1,1",     "k48ap",    0x02, 0x8930, "iPad" },
+	{ "iPad2,1",     "k93ap",    0x04, 0x8940, "iPad 2 (WiFi)" },
+	{ "iPad2,2",     "k94ap",    0x06, 0x8940, "iPad 2 (GSM)" },
+	{ "iPad2,3",     "k95ap",    0x02, 0x8940, "iPad 2 (CDMA)" },
+	{ "iPad2,4",     "k93aap",   0x06, 0x8942, "iPad 2 (WiFi) R2 2012" },
+	{ "iPad2,5",     "p105ap",   0x0a, 0x8942, "iPad Mini (WiFi)" },
+	{ "iPad2,6",     "p106ap",   0x0c, 0x8942, "iPad Mini (GSM)" },
+	{ "iPad2,7",     "p107ap",   0x0e, 0x8942, "iPad Mini (Global)" },
+	{ "iPad3,1",     "j1ap",     0x00, 0x8945, "iPad 3 (WiFi)" },
+	{ "iPad3,2",     "j2ap",     0x02, 0x8945, "iPad 3 (CDMA)" },
+	{ "iPad3,3",     "j2aap",    0x04, 0x8945, "iPad 3 (GSM)" },
+	{ "iPad3,4",     "p101ap",   0x00, 0x8955, "iPad 4 (WiFi)" },
+	{ "iPad3,5",     "p102ap",   0x02, 0x8955, "iPad 4 (GSM)" },
+	{ "iPad3,6",     "p103ap",   0x04, 0x8955, "iPad 4 (Global)" },
+	{ "iPad4,1",     "j71ap",    0x10, 0x8960, "iPad Air (WiFi)" },
+	{ "iPad4,2",     "j72ap",    0x12, 0x8960, "iPad Air (Cellular)" },
+	{ "iPad4,4",     "j85ap",    0x0a, 0x8960, "iPad Mini 2 (WiFi)" },
+	{ "iPad4,5",     "j86ap",    0x0c, 0x8960, "iPad Mini 2 (Cellular)" },
+	{ "iPad4,6",     "j87ap",    0x0e, 0x8960, "iPad Mini 2 (China)" },
+	{ "iPad4,7",     "j85map",   0x32, 0x8960, "iPad Mini 3 (WiFi)" },
+	{ "iPad4,8",     "j86map",   0x34, 0x8960, "iPad Mini 3 (Cellular)" },
+	{ "iPad4,9",     "j87map",   0x36, 0x8960, "iPad Mini 3 (China)" },
+	{ "iPad5,1",     "j96ap",    0x08, 0x7000, "iPad Mini 4 (WiFi)" },
+	{ "iPad5,2",     "j97ap",    0x0A, 0x7000, "iPad Mini 4 (Cellular)" },
+	{ "iPad5,3",     "j81ap",    0x06, 0x7001, "iPad Air 2 (WiFi)" },
+	{ "iPad5,4",     "j82ap",    0x02, 0x7001, "iPad Air 2 (Cellular)" },
+	{ "iPad6,3",     "j127ap",   0x08, 0x8001, "iPad Pro 9.7in (WiFi)" },
+	{ "iPad6,4",     "j128ap",   0x0a, 0x8001, "iPad Pro 9.7in (Cellular)" },
+	{ "iPad6,7",     "j98aap",   0x10, 0x8001, "iPad Pro 12.9in (WiFi)" },
+	{ "iPad6,8",     "j99aap",   0x12, 0x8001, "iPad Pro 12.9in (Cellular)" },
+	{ "iPad6,11",    "j71sap",   0x10, 0x8000, "iPad 5 (WiFi)" },
+	{ "iPad6,11",    "j71tap",   0x10, 0x8003, "iPad 5 (WiFi)" },
+	{ "iPad6,12",    "j72sap",   0x12, 0x8000, "iPad 5 (Cellular)" },
+	{ "iPad6,12",    "j72tap",   0x12, 0x8003, "iPad 5 (Cellular)" },
+	{ "iPad7,1",     "j120ap",   0x0C, 0x8011, "iPad Pro 2 12.9in (WiFi)" },
+	{ "iPad7,2",     "j121ap",   0x0E, 0x8011, "iPad Pro 2 12.9in (Cellular)" },
+	{ "iPad7,3",     "j207ap",   0x04, 0x8011, "iPad Pro 10.5in (WiFi)" },
+	{ "iPad7,4",     "j208ap",   0x06, 0x8011, "iPad Pro 10.5in (Cellular)" },
+	{ "iPad7,5",     "j71bap",   0x18, 0x8010, "iPad 6 (WiFi)" },
+	{ "iPad7,6",     "j72bap",   0x1A, 0x8010, "iPad 6 (Cellular)" },
+	{ "iPad7,11",    "j172ap",   0x1E, 0x8010, "iPad 7 (WiFi)" },
+	{ "iPad7,12",    "j171ap",   0x1C, 0x8010, "iPad 7 (Cellular)" },
+	{ "iPad8,1",     "j317ap",   0x0C, 0x8027, "iPad Pro 3 11in (WiFi)" },
+	{ "iPad8,2",     "j317xap",  0x1C, 0x8027, "iPad Pro 3 11in (WiFi, 1TB)" },
+	{ "iPad8,3",     "j318ap",   0x0E, 0x8027, "iPad Pro 3 11in (Cellular)" },
+	{ "iPad8,4",     "j318xap",  0x1E, 0x8027, "iPad Pro 3 11in (Cellular, 1TB)" },
+	{ "iPad8,5",     "j320ap",   0x08, 0x8027, "iPad Pro 3 12.9in (WiFi)" },
+	{ "iPad8,6",     "j320xap",  0x18, 0x8027, "iPad Pro 3 12.9in (WiFi, 1TB)" },
+	{ "iPad8,7",     "j321ap",   0x0A, 0x8027, "iPad Pro 3 12.9in (Cellular)" },
+	{ "iPad8,8",     "j321xap",  0x1A, 0x8027, "iPad Pro 3 12.9in (Cellular, 1TB)" },
+	{ "iPad11,1",    "j210ap",   0x14, 0x8020, "iPad Mini 5 (WiFi)" },
+	{ "iPad11,2",    "j211ap",   0x16, 0x8020, "iPad Mini 5 (Cellular)" },
+	{ "iPad11,3",    "j217ap",   0x1C, 0x8020, "iPad Air 3 (WiFi)" },
+	{ "iPad11,4",    "j218ap",   0x1E, 0x8020, "iPad Air 3 (Celluar)" },
+	/* Apple TV */
+	{ "AppleTV2,1",  "k66ap",    0x10, 0x8930, "Apple TV 2" },
+	{ "AppleTV3,1",  "j33ap",    0x08, 0x8942, "Apple TV 3" },
+	{ "AppleTV3,2",  "j33iap",   0x00, 0x8947, "Apple TV 3 (2013)" },
+	{ "AppleTV5,3",  "j42dap",   0x34, 0x7000, "Apple TV 4" },
+	{ "AppleTV6,2",  "j105aap",  0x02, 0x8011, "Apple TV 4K" },
+	/* Apple T2 Coprocessor */
+	{ "iBridge2,1",	 "j137ap",   0x0A, 0x8012, "Apple T2 iMacPro1,1 (j137)" },
+	{ "iBridge2,3",	 "j680ap",   0x0B, 0x8012, "Apple T2 MacBookPro15,1 (j680)" },
+	{ "iBridge2,4",	 "j132ap",   0x0C, 0x8012, "Apple T2 MacBookPro15,2 (j132)" },
+	{ "iBridge2,5",	 "j174ap",   0x0E, 0x8012, "Apple T2 Macmini8,1 (j174)" },
+	{ "iBridge2,6",	 "j160ap",   0x0F, 0x8012, "Apple T2 MacPro7,1 (j160)" },
+	{ "iBridge2,7",	 "j780ap",   0x07, 0x8012, "Apple T2 MacBookPro15,3 (j780)" },
+	{ "iBridge2,8",	 "j140kap",  0x17, 0x8012, "Apple T2 MacBookAir8,1 (j140k)" },
+	{ "iBridge2,10", "j213ap",   0x18, 0x8012, "Apple T2 MacBookPro15,4 (j213)" },
+	{ "iBridge2,12", "j140aap",  0x37, 0x8012, "Apple T2 MacBookAir8,2 (j140a)" },
+	{ "iBridge2,14", "j152f",    0x3A, 0x8012, "Apple T2 MacBookPro16,1 (j152f)" },
     {"Watch3,3", "n121sap", 0x18, 0x8004 },
-	{        NULL,    NULL,   -1,     -1 }
+	{ NULL,          NULL,      -1,   -1,     NULL }
 };
 
-static unsigned int dfu_hash_t1[256] = {
+#ifndef USE_DUMMY
+static unsigned int crc32_lookup_t1[256] = {
 	0x00000000, 0x77073096, 0xEE0E612C, 0x990951BA,
 	0x076DC419, 0x706AF48F, 0xE963A535, 0x9E6495A3,
 	0x0EDB8832, 0x79DCB8A4, 0xE0D5E91E, 0x97D2D988,
@@ -243,8 +311,80 @@ static unsigned int dfu_hash_t1[256] = {
 	0xB40BBE37, 0xC30C8EA1, 0x5A05DF1B, 0x2D02EF8D,
 };
 
-#define dfu_hash_step(a,b) \
-	a = (dfu_hash_t1[(a & 0xFF) ^ ((unsigned char)b)] ^ (a >> 8))
+#define crc32_step(a,b) \
+	a = (crc32_lookup_t1[(a & 0xFF) ^ ((unsigned char)b)] ^ (a >> 8))
+
+static THREAD_T th_event_handler = THREAD_T_NULL;
+struct collection listeners;
+static mutex_t listener_mutex;
+struct collection devices;
+static mutex_t device_mutex;
+#ifndef WIN32
+#ifdef HAVE_IOKIT
+static CFRunLoopRef iokit_runloop = NULL;
+#else
+static libusb_context* irecv_hotplug_ctx = NULL;
+#endif
+#endif
+
+static void _irecv_init(void)
+{
+#ifndef USE_DUMMY
+#ifndef WIN32
+#ifndef HAVE_IOKIT
+	libusb_init(&libirecovery_context);
+#endif
+#endif
+	collection_init(&listeners);
+	mutex_init(&listener_mutex);
+#endif
+}
+
+static void _irecv_deinit(void)
+{
+#ifndef USE_DUMMY
+#ifndef WIN32
+#ifndef HAVE_IOKIT
+	if (libirecovery_context != NULL) {
+		libusb_exit(libirecovery_context);
+		libirecovery_context = NULL;
+	}
+#endif
+#endif
+	collection_free(&listeners);
+	mutex_destroy(&listener_mutex);
+#endif
+}
+
+static thread_once_t init_once = THREAD_ONCE_INIT;
+static thread_once_t deinit_once = THREAD_ONCE_INIT;
+
+#ifdef WIN32
+BOOL WINAPI DllMain(HINSTANCE hModule, DWORD dwReason, LPVOID lpReserved)
+{
+	switch (dwReason) {
+	case DLL_PROCESS_ATTACH:
+		thread_once(&init_once, _irecv_init);
+		break;
+	case DLL_PROCESS_DETACH:
+		thread_once(&deinit_once, _irecv_deinit);
+		break;
+	default:
+		break;
+	}
+	return 1;
+}
+#else
+static void __attribute__((constructor)) libirecovery_initialize(void)
+{
+	thread_once(&init_once, _irecv_init);
+}
+
+static void __attribute__((destructor)) libirecovery_deinitialize(void)
+{
+	thread_once(&deinit_once, _irecv_deinit);
+}
+#endif
 
 #ifdef HAVE_IOKIT
 static int iokit_get_string_descriptor_ascii(irecv_client_t client, uint8_t desc_index, unsigned char * buffer, int size) {
@@ -314,7 +454,7 @@ static int irecv_get_string_descriptor_ascii(irecv_client_t client, uint8_t desc
 
 	if (ret < 0) return ret;
 	if (data[1] != 0x03) return IRECV_E_UNKNOWN_ERROR;
-	if (data[0] > ret) return IRECV_E_UNKNOWN_ERROR; 
+	if (data[0] > ret) return IRECV_E_UNKNOWN_ERROR;
 
 	for (di = 0, si = 2; si < data[0]; si += 2) {
 		if (di >= (size - 1)) break;
@@ -338,6 +478,8 @@ static void irecv_load_device_info_from_iboot_string(irecv_client_t client, cons
 	}
 
 	memset(&client->device_info, '\0', sizeof(struct irecv_device_info));
+
+	client->device_info.serial_string = strdup(iboot_string);
 
 	char* ptr;
 
@@ -398,7 +540,18 @@ static void irecv_load_device_info_from_iboot_string(irecv_client_t client, cons
 		}
 		client->device_info.imei = strdup(tmp);
 	}
-}	
+
+	tmp[0] = '\0';
+	ptr = strstr(iboot_string, "SRTG:[");
+	if(ptr != NULL) {
+		sscanf(ptr, "SRTG:[%s]", tmp);
+		ptr = strrchr(tmp, ']');
+		if(ptr != NULL) {
+			*ptr = '\0';
+		}
+		client->device_info.srtg = strdup(tmp);
+	}
+}
 
 static void irecv_copy_nonce_with_tag(irecv_client_t client, const char* tag, unsigned char** nonce, unsigned int* nonce_size)
 {
@@ -514,10 +667,8 @@ irecv_error_t mobiledevice_connect(irecv_client_t* client, unsigned long long ec
 	memset(&currentInterface, '\0', sizeof(SP_DEVICE_INTERFACE_DATA));
 	currentInterface.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
 	for(i = 0; usbDevices && SetupDiEnumDeviceInterfaces(usbDevices, NULL, &GUID_DEVINTERFACE_DFU, i, &currentInterface); i++) {
-		if (_client->DfuPath) {
-			free(_client->DfuPath);
-			_client->DfuPath = NULL;
-		}
+		free(_client->DfuPath);
+		_client->DfuPath = NULL;
 		_client->handle = NULL;
 		DWORD requiredSize = 0;
 		PSP_DEVICE_INTERFACE_DETAIL_DATA details;
@@ -554,13 +705,19 @@ irecv_error_t mobiledevice_connect(irecv_client_t* client, unsigned long long ec
 			}
 
 			char serial_str[256];
+			char *p = result + strlen(result) - 1;
+			while (p-- && p > result) {
+				if (*p == '\\' && (strncmp(p, "\\usb", 4) == 0)) {
+					break;
+				}
+			}
 			serial_str[0] = '\0';
-			if ((sscanf(result, "\\\\?\\usb#vid_%*04x&pid_%*04x#%s#", serial_str) != 1) || (serial_str[0] == '\0')) {
+			if (!p || (sscanf(p, "\\usb#vid_%*04x&pid_%*04x#%s", serial_str) != 1) || (serial_str[0] == '\0')) {
 				mobiledevice_closepipes(_client);
 				continue;
 			}
 
-			char* p = strchr(serial_str, '#');
+			p = strchr(serial_str, '#');
 			if (p) {
 				*p = '\0';
 			}
@@ -601,10 +758,8 @@ irecv_error_t mobiledevice_connect(irecv_client_t* client, unsigned long long ec
 	memset(&currentInterface, '\0', sizeof(SP_DEVICE_INTERFACE_DATA));
 	currentInterface.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
 	for(i = 0; usbDevices && SetupDiEnumDeviceInterfaces(usbDevices, NULL, &GUID_DEVINTERFACE_IBOOT, i, &currentInterface); i++) {
-		if (_client->iBootPath) {
-			free(_client->iBootPath);
-			_client->iBootPath = NULL;
-		}
+		free(_client->iBootPath);
+		_client->iBootPath = NULL;
 		_client->handle = NULL;
 		DWORD requiredSize = 0;
 		PSP_DEVICE_INTERFACE_DETAIL_DATA details;
@@ -632,13 +787,19 @@ irecv_error_t mobiledevice_connect(irecv_client_t* client, unsigned long long ec
 			}
 
 			char serial_str[256];
+			char *p = result + strlen(result) - 1;
+			while (p-- && p > result) {
+				if (*p == '\\' && (strncmp(p, "\\usb", 4) == 0)) {
+					break;
+				}
+			}
 			serial_str[0] = '\0';
-			if ((sscanf(result, "\\\\?\\usb#vid_%*04x&pid_%*04x#%s#", serial_str) != 1) || (serial_str[0] == '\0')) {
+			if (!p || (sscanf(p, "\\usb#vid_%*04x&pid_%*04x#%s", serial_str) != 1) || (serial_str[0] == '\0')) {
 				mobiledevice_closepipes(_client);
 				continue;
 			}
 
-			char* p = strchr(serial_str, '#');
+			p = strchr(serial_str, '#');
 			if (p) {
 				*p = '\0';
 			}
@@ -648,7 +809,7 @@ irecv_error_t mobiledevice_connect(irecv_client_t* client, unsigned long long ec
 				if (serial_str[j] == '_') {
 					serial_str[j] = ' ';
 				} else {
-					serial_str[j] = toupper(serial_str[j]);	
+					serial_str[j] = toupper(serial_str[j]);
 				}
 			}
 
@@ -743,26 +904,19 @@ static int check_context(irecv_client_t client) {
 
 	return IRECV_E_SUCCESS;
 }
+#endif
 
-IRECV_API void irecv_init(void) {
-#ifndef WIN32
-#ifndef HAVE_IOKIT
-	libusb_init(&libirecovery_context);
-#endif
-#endif
+IRECV_API void irecv_init(void)
+{
+	thread_once(&init_once, _irecv_init);
 }
 
-IRECV_API void irecv_exit(void) {
-#ifndef WIN32
-#ifndef HAVE_IOKIT
-	if (libirecovery_context != NULL) {
-		libusb_exit(libirecovery_context);
-		libirecovery_context = NULL;
-	}
-#endif
-#endif
+IRECV_API void irecv_exit(void)
+{
+	thread_once(&deinit_once, _irecv_deinit);
 }
 
+#ifndef USE_DUMMY
 #ifdef HAVE_IOKIT
 static int iokit_usb_control_transfer(irecv_client_t client, uint8_t bm_request_type, uint8_t b_request, uint16_t w_value, uint16_t w_index, unsigned char *data, uint16_t w_length, unsigned int timeout)
 {
@@ -795,8 +949,12 @@ static int iokit_usb_control_transfer(irecv_client_t client, uint8_t bm_request_
 	void dummy_callback(void) { }
 #endif
 #endif
+#endif
 
 IRECV_API int irecv_usb_control_transfer(irecv_client_t client, uint8_t bm_request_type, uint8_t b_request, uint16_t w_value, uint16_t w_index, unsigned char *data, uint16_t w_length, unsigned int timeout) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 #ifndef WIN32
 #ifdef HAVE_IOKIT
 	return iokit_usb_control_transfer(client, bm_request_type, b_request, w_value, w_index, data, w_length, timeout);
@@ -817,7 +975,7 @@ IRECV_API int irecv_usb_control_transfer(irecv_client_t client, uint8_t bm_reque
 	packet->wValue = w_value;
 	packet->wIndex = w_index;
 	packet->wLength = w_length;
-	
+
 	if (bm_request_type < 0x80 && w_length > 0) {
 		memcpy(packet->data, data, w_length);
 	}
@@ -844,8 +1002,10 @@ IRECV_API int irecv_usb_control_transfer(irecv_client_t client, uint8_t bm_reque
 
 	return count;
 #endif
+#endif
 }
 
+#ifndef USE_DUMMY
 #ifdef HAVE_IOKIT
 static int iokit_usb_bulk_transfer(irecv_client_t client,
 						unsigned char endpoint,
@@ -899,6 +1059,7 @@ static int iokit_usb_bulk_transfer(irecv_client_t client,
 	return IRECV_E_USB_INTERFACE;
 }
 #endif
+#endif
 
 IRECV_API int irecv_usb_bulk_transfer(irecv_client_t client,
 							unsigned char endpoint,
@@ -906,6 +1067,9 @@ IRECV_API int irecv_usb_bulk_transfer(irecv_client_t client,
 							int length,
 							int *transferred,
 							unsigned int timeout) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	int ret;
 
 #ifndef WIN32
@@ -927,8 +1091,10 @@ IRECV_API int irecv_usb_bulk_transfer(irecv_client_t client,
 #endif
 
 	return ret;
+#endif
 }
 
+#ifndef USE_DUMMY
 #ifdef HAVE_IOKIT
 static irecv_error_t iokit_usb_open_service(irecv_client_t *pclient, io_service_t service) {
 
@@ -965,7 +1131,7 @@ static irecv_error_t iokit_usb_open_service(irecv_client_t *pclient, io_service_
 	IOObjectRelease(service);
 
 	// Create the device interface
-	result = (*plug)->QueryInterface(plug, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID), (LPVOID *)&(client->handle));
+	result = (*plug)->QueryInterface(plug, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID320), (LPVOID *)&(client->handle));
 	IODestroyPlugInInterface(plug);
 	if (result != kIOReturnSuccess) {
 		free(client);
@@ -1047,8 +1213,8 @@ static irecv_error_t iokit_open_with_ecid(irecv_client_t* pclient, unsigned long
 	CFRange range;
 
 	UInt16 wtf_pids[] = { IRECV_K_WTF_MODE, 0};
-	UInt16 all_pids[] = { IRECV_K_WTF_MODE, IRECV_K_DFU_MODE, IRECV_K_RECOVERY_MODE_2, 0 }; // 0x1222, 0x1227, 0x1281
-UInt16 *pids = all_pids;
+	UInt16 all_pids[] = { IRECV_K_WTF_MODE, IRECV_K_DFU_MODE, IRECV_K_RECOVERY_MODE_1, IRECV_K_RECOVERY_MODE_2, IRECV_K_RECOVERY_MODE_3, IRECV_K_RECOVERY_MODE_4, 0 };
+	UInt16 *pids = all_pids;
 	int i;
 
 	if (pclient == NULL) {
@@ -1114,14 +1280,20 @@ UInt16 *pids = all_pids;
 	return iokit_usb_open_service(pclient, ret_service);
 }
 #endif
+#endif
 
 IRECV_API irecv_error_t irecv_open_with_ecid(irecv_client_t* pclient, unsigned long long ecid) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
+	int ret = IRECV_E_UNABLE_TO_CONNECT;
+
 	if(libirecovery_debug) {
 		irecv_set_debug_level(libirecovery_debug);
 	}
 #ifndef WIN32
 #ifdef HAVE_IOKIT
-	return iokit_open_with_ecid(pclient, ecid);
+	ret = iokit_open_with_ecid(pclient, ecid);
 #else
 	int i = 0;
 	struct libusb_device* usb_device = NULL;
@@ -1226,15 +1398,13 @@ IRECV_API irecv_error_t irecv_open_with_ecid(irecv_client_t* pclient, unsigned l
 
 				libusb_free_device_list(usb_device_list, 1);
 
-				return IRECV_E_SUCCESS;
+				ret = IRECV_E_SUCCESS;
 			}
 		}
 	}
-
-	return IRECV_E_UNABLE_TO_CONNECT;
 #endif
 #else
-	int ret = mobiledevice_connect(pclient, ecid);
+	ret = mobiledevice_connect(pclient, ecid);
 	if (ret == IRECV_E_SUCCESS) {
 		irecv_client_t client = *pclient;
 		int error = IRECV_E_SUCCESS;
@@ -1250,12 +1420,25 @@ IRECV_API irecv_error_t irecv_open_with_ecid(irecv_client_t* pclient, unsigned l
 			debug("WARNING: set interface failed, error %d\n", error);
 		}
 	}
-
+#endif
+	if (ret == IRECV_E_SUCCESS) {
+		if ((*pclient)->connected_callback != NULL) {
+			irecv_event_t event;
+			event.size = 0;
+			event.data = NULL;
+			event.progress = 0;
+			event.type = IRECV_CONNECTED;
+			(*pclient)->connected_callback(*pclient, &event);
+		}
+	}
 	return ret;
 #endif
 }
 
 IRECV_API irecv_error_t irecv_usb_set_configuration(irecv_client_t client, int configuration) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
 
@@ -1283,8 +1466,10 @@ IRECV_API irecv_error_t irecv_usb_set_configuration(irecv_client_t client, int c
 #endif
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
+#ifndef USE_DUMMY
 #ifdef HAVE_IOKIT
 static IOReturn iokit_usb_get_interface(IOUSBDeviceInterface320 **device, uint8_t ifc, io_service_t *usbInterfacep) {
 
@@ -1340,7 +1525,7 @@ static irecv_error_t iokit_usb_set_interface(irecv_client_t client, int usb_inte
 		return IRECV_E_USB_INTERFACE;
 	}
 
-	result = (*plugInInterface)->QueryInterface(plugInInterface, CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID), (LPVOID)&client->usbInterface);
+	result = (*plugInInterface)->QueryInterface(plugInInterface, CFUUIDGetUUIDBytes(kIOUSBInterfaceInterfaceID300), (LPVOID)&client->usbInterface);
 	IODestroyPlugInInterface(plugInInterface);
 	if (result != kIOReturnSuccess) {
 		debug("error creating interface interface: %#x\n", result);
@@ -1364,8 +1549,12 @@ static irecv_error_t iokit_usb_set_interface(irecv_client_t client, int usb_inte
 	return IRECV_E_SUCCESS;
 }
 #endif
+#endif
 
 IRECV_API irecv_error_t irecv_usb_set_interface(irecv_client_t client, int usb_interface, int usb_alt_interface) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
 
@@ -1395,9 +1584,13 @@ IRECV_API irecv_error_t irecv_usb_set_interface(irecv_client_t client, int usb_i
 	client->usb_alt_interface = usb_alt_interface;
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_reset(irecv_client_t client) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
 
@@ -1424,9 +1617,13 @@ IRECV_API irecv_error_t irecv_reset(irecv_client_t client) {
 #endif
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_open_with_ecid_and_attempts(irecv_client_t* pclient, unsigned long long ecid, int attempts) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	int i;
 
 	for (i = 0; i < attempts; i++) {
@@ -1443,9 +1640,13 @@ IRECV_API irecv_error_t irecv_open_with_ecid_and_attempts(irecv_client_t* pclien
 	}
 
 	return IRECV_E_UNABLE_TO_CONNECT;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_event_subscribe(irecv_client_t client, irecv_event_type type, irecv_event_cb_t callback, void* user_data) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	switch(type) {
 	case IRECV_RECEIVED:
 		client->received_callback = callback;
@@ -1453,9 +1654,11 @@ IRECV_API irecv_error_t irecv_event_subscribe(irecv_client_t client, irecv_event
 
 	case IRECV_PROGRESS:
 		client->progress_callback = callback;
+		break;
 
 	case IRECV_CONNECTED:
 		client->connected_callback = callback;
+		break;
 
 	case IRECV_PRECOMMAND:
 		client->precommand_callback = callback;
@@ -1467,15 +1670,20 @@ IRECV_API irecv_error_t irecv_event_subscribe(irecv_client_t client, irecv_event
 
 	case IRECV_DISCONNECTED:
 		client->disconnected_callback = callback;
+		break;
 
 	default:
 		return IRECV_E_UNKNOWN_ERROR;
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_event_unsubscribe(irecv_client_t client, irecv_event_type type) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	switch(type) {
 	case IRECV_RECEIVED:
 		client->received_callback = NULL;
@@ -1483,9 +1691,11 @@ IRECV_API irecv_error_t irecv_event_unsubscribe(irecv_client_t client, irecv_eve
 
 	case IRECV_PROGRESS:
 		client->progress_callback = NULL;
+		break;
 
 	case IRECV_CONNECTED:
 		client->connected_callback = NULL;
+		break;
 
 	case IRECV_PRECOMMAND:
 		client->precommand_callback = NULL;
@@ -1497,15 +1707,643 @@ IRECV_API irecv_error_t irecv_event_unsubscribe(irecv_client_t client, irecv_eve
 
 	case IRECV_DISCONNECTED:
 		client->disconnected_callback = NULL;
+		break;
 
 	default:
 		return IRECV_E_UNKNOWN_ERROR;
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
+}
+
+#ifndef USE_DUMMY
+struct irecv_device_event_context {
+	irecv_device_event_cb_t callback;
+	void *user_data;
+};
+
+struct irecv_usb_device_info {
+	struct irecv_device_info device_info;
+	uint32_t location;
+	int alive;
+};
+
+#ifdef WIN32
+struct irecv_win_dev_ctx {
+	PSP_DEVICE_INTERFACE_DETAIL_DATA details;
+	uint32_t location;
+};
+#else
+#ifdef HAVE_IOKIT
+struct irecv_iokit_dev_ctx {
+	io_service_t device;
+	IOUSBDeviceInterface **dev;
+};
+#endif
+#endif
+
+static int _irecv_is_recovery_device(void *device)
+{
+	uint16_t vendor_id = 0;
+	uint16_t product_id = 0;
+#ifdef WIN32
+	const char *path = (const char*)device;
+	unsigned int vendor = 0;
+	unsigned int product = 0;
+	if (sscanf(path, "\\usb#vid_%04x&pid_%04x#", &vendor, &product) != 2) {
+		return 0;
+	}
+	vendor_id = (uint16_t)vendor;
+	product_id = (uint16_t)product;
+#else
+#ifdef HAVE_IOKIT
+	kern_return_t kr;
+	IOUSBDeviceInterface **dev = device;
+	kr = (*dev)->GetDeviceVendor(dev, &vendor_id);
+	kr = (*dev)->GetDeviceProduct(dev, &product_id);
+#else
+	libusb_device *device_ = (libusb_device*)device;
+	struct libusb_device_descriptor devdesc;
+	int libusb_error;
+
+	libusb_error = libusb_get_device_descriptor(device_, &devdesc);
+	if (libusb_error != 0) {
+		debug("%s: failed to get device descriptor: %s\n", __func__, libusb_error_name(libusb_error));
+		return 0;
+	}
+	vendor_id = devdesc.idVendor;
+	product_id = devdesc.idProduct;
+#endif
+#endif
+
+	if (vendor_id != APPLE_VENDOR_ID) {
+		return 0;
+	}
+
+	switch (product_id) {
+		case IRECV_K_DFU_MODE:
+		case IRECV_K_WTF_MODE:
+		case IRECV_K_RECOVERY_MODE_1:
+		case IRECV_K_RECOVERY_MODE_2:
+		case IRECV_K_RECOVERY_MODE_3:
+		case IRECV_K_RECOVERY_MODE_4:
+			break;
+		default:
+			return 0;
+	}
+	return 1;
+}
+
+static void* _irecv_handle_device_add(void *userdata)
+{
+	struct irecv_client_private client_loc;
+	char serial_str[256];
+	uint32_t location = 0;
+	uint16_t product_id = 0;
+
+	serial_str[0] = '\0';
+#ifdef WIN32
+	struct irecv_win_dev_ctx *win_ctx = (struct irecv_win_dev_ctx*)userdata;
+	PSP_DEVICE_INTERFACE_DETAIL_DATA details = win_ctx->details;
+	LPSTR result = (LPSTR)details->DevicePath;
+	location = win_ctx->location;
+
+	char *p = result + strlen(result) - 1;
+	while (p-- && p > result) {
+		if (*p == '\\' && (strncmp(p, "\\usb", 4) == 0)) {
+			break;
+		}
+	}
+
+	unsigned int pid = 0;
+	if (!p || (sscanf(p, "\\usb#vid_%*04x&pid_%04x#%s", &pid, serial_str) != 2) || (serial_str[0] == '\0')) {
+		fprintf(stderr, "%s: ERROR: failed to parse DevicePath?!\n", __func__);
+		return NULL;
+	}
+	if (!_irecv_is_recovery_device(p)) {
+		return NULL;
+	}
+
+	p = strchr(serial_str, '#');
+	if (p) {
+		*p = '\0';
+	}
+
+	unsigned int j;
+	for (j = 0; j < strlen(serial_str); j++) {
+		if (serial_str[j] == '_') {
+			serial_str[j] = ' ';
+		} else {
+			serial_str[j] = toupper(serial_str[j]);
+		}
+	}
+	product_id = (uint16_t)pid;
+
+#else /* !WIN32 */
+#ifdef HAVE_IOKIT
+	struct irecv_iokit_dev_ctx* iokit_ctx = (struct irecv_iokit_dev_ctx*)userdata;
+	io_service_t device = iokit_ctx->device;
+	IOUSBDeviceInterface **dev = iokit_ctx->dev;
+
+	if (!device) {
+		fprintf(stderr, "%s: ERROR: no device?!\n", __func__);
+		return NULL;
+	}
+	if (!dev) {
+		fprintf(stderr, "%s: ERROR: no device interface?!\n", __func__);
+		return NULL;
+	}
+
+	(*dev)->GetDeviceProduct(dev, &product_id);
+	if (!product_id) {
+		fprintf(stderr, "%s: ERROR: could not get product id?!\n", __func__);
+		return NULL;
+	}
+	CFNumberRef locationNum = (CFNumberRef)IORegistryEntryCreateCFProperty(device, CFSTR(kUSBDevicePropertyLocationID), kCFAllocatorDefault, 0);
+	if (locationNum) {
+		CFNumberGetValue(locationNum, kCFNumberSInt32Type, &location);
+		CFRelease(locationNum);
+	}
+	if (!location) {
+		fprintf(stderr, "%s: ERROR: could not get locationID?!\n", __func__);
+		return NULL;
+	}
+	CFStringRef serialString = (CFStringRef)IORegistryEntryCreateCFProperty(device, CFSTR(kUSBSerialNumberString), kCFAllocatorDefault, 0);
+	if (serialString) {
+		CFStringGetCString(serialString, serial_str, sizeof(serial_str), kCFStringEncodingUTF8);
+		CFRelease(serialString);
+	}
+#else /* !HAVE_IOKIT */
+	libusb_device *device = (libusb_device*)userdata;
+	struct libusb_device_descriptor devdesc;
+	struct libusb_device_handle* usb_handle = NULL;
+	int libusb_error;
+
+	libusb_error = libusb_get_device_descriptor(device, &devdesc);
+	if (libusb_error != 0) {
+		fprintf(stderr, "%s: ERROR: failed to get device descriptor: %s\n", __func__, libusb_error_name(libusb_error));
+		return NULL;
+	}
+	product_id = devdesc.idProduct;
+
+	uint8_t bus = libusb_get_bus_number(device);
+	uint8_t address = libusb_get_device_address(device);
+	location = (bus << 16) | address;
+
+	libusb_error = libusb_open(device, &usb_handle);
+	if (usb_handle == NULL || libusb_error != 0) {
+		fprintf(stderr, "%s: ERROR: can't connect to device: %s\n", __func__, libusb_error_name(libusb_error));
+		libusb_close(usb_handle);
+		return 0;
+	}
+
+	libusb_error = libusb_get_string_descriptor_ascii(usb_handle, devdesc.iSerialNumber, (unsigned char*)serial_str, 255);
+	if (libusb_error < 0) {
+		fprintf(stderr, "%s: Failed to get string descriptor: %s\n", __func__, libusb_error_name(libusb_error));
+		return 0;
+	}
+	libusb_close(usb_handle);
+#endif /* !HAVE_IOKIT */
+#endif /* !WIN32 */
+	memset(&client_loc, '\0', sizeof(client_loc));
+	irecv_load_device_info_from_iboot_string(&client_loc, serial_str);
+	client_loc.mode = product_id;
+
+	struct irecv_usb_device_info *usb_dev_info = (struct irecv_usb_device_info*)malloc(sizeof(struct irecv_usb_device_info));
+	memcpy(&(usb_dev_info->device_info), &(client_loc.device_info), sizeof(struct irecv_device_info));
+	usb_dev_info->location = location;
+	usb_dev_info->alive = 1;
+
+	collection_add(&devices, usb_dev_info);
+
+	irecv_device_event_t dev_event;
+	dev_event.type = IRECV_DEVICE_ADD;
+	dev_event.mode = client_loc.mode;
+	dev_event.device_info = &(usb_dev_info->device_info);
+
+	mutex_lock(&listener_mutex);
+	FOREACH(struct irecv_device_event_context* context, &listeners) {
+		context->callback(&dev_event, context->user_data);
+	} ENDFOREACH
+	mutex_unlock(&listener_mutex);
+
+	return NULL;
+}
+
+static void _irecv_handle_device_remove(struct irecv_usb_device_info *devinfo)
+{
+	irecv_device_event_t dev_event;
+	dev_event.type = IRECV_DEVICE_REMOVE;
+	dev_event.mode = 0;
+	dev_event.device_info = &(devinfo->device_info);
+	mutex_lock(&listener_mutex);
+	FOREACH(struct irecv_device_event_context* context, &listeners) {
+		context->callback(&dev_event, context->user_data);
+	} ENDFOREACH
+	mutex_unlock(&listener_mutex);
+	free(devinfo->device_info.srnm);
+	devinfo->device_info.srnm = NULL;
+	free(devinfo->device_info.imei);
+	devinfo->device_info.imei = NULL;
+	free(devinfo->device_info.srtg);
+	devinfo->device_info.srtg = NULL;
+	free(devinfo->device_info.serial_string);
+	devinfo->device_info.serial_string = NULL;
+	devinfo->alive = 0;
+	collection_remove(&devices, devinfo);
+	free(devinfo);
+}
+
+#ifndef WIN32
+#ifdef HAVE_IOKIT
+static void iokit_device_added(void *refcon, io_iterator_t iterator)
+{
+	kern_return_t kr;
+	io_service_t device;
+	IOCFPlugInInterface **plugInInterface = NULL;
+	IOUSBDeviceInterface **dev = NULL;
+	HRESULT result;
+	SInt32 score;
+
+	while ((device = IOIteratorNext(iterator))) {
+		kr = IOCreatePlugInInterfaceForService(device, kIOUSBDeviceUserClientTypeID, kIOCFPlugInInterfaceID, &plugInInterface, &score);
+		if ((kIOReturnSuccess != kr) || !plugInInterface) {
+			fprintf(stderr, "%s: ERROR: Unable to create a plug-in (%08x)\n", __func__, kr);
+			kr = IOObjectRelease(device);
+			continue;
+		}
+		result = (*plugInInterface)->QueryInterface(plugInInterface, CFUUIDGetUUIDBytes(kIOUSBDeviceInterfaceID320), (LPVOID *)&dev);
+		(*plugInInterface)->Release(plugInInterface);
+
+		if (result || !dev) {
+			fprintf(stderr, "%s: ERROR: Couldn't create a device interface (%08x)\n", __func__, (int)result);
+			kr = IOObjectRelease(device);
+			continue;
+		}
+
+		if (!_irecv_is_recovery_device(dev)) {
+			(void) (*dev)->Release(dev);
+			kr = IOObjectRelease(device);
+			continue;
+		}
+
+		struct irecv_iokit_dev_ctx idev;
+		idev.device = device;
+		idev.dev = dev;
+		_irecv_handle_device_add(&idev);
+		(void) (*dev)->Release(dev);
+		kr = IOObjectRelease(device);
+	}
+}
+
+static void iokit_device_removed(void *refcon, io_iterator_t iterator)
+{
+	io_service_t device;
+
+	while ((device = IOIteratorNext(iterator))) {
+		uint32_t location = 0;
+		CFNumberRef locationNum = (CFNumberRef)IORegistryEntryCreateCFProperty(device, CFSTR(kUSBDevicePropertyLocationID), kCFAllocatorDefault, 0);
+		if (locationNum) {
+			CFNumberGetValue(locationNum, kCFNumberSInt32Type, &location);
+			CFRelease(locationNum);
+		}
+		IOObjectRelease(device);
+
+		if (!location) {
+			continue;
+		}
+
+		FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+			if (devinfo->location == location) {
+				_irecv_handle_device_remove(devinfo);
+				break;
+			}
+		} ENDFOREACH
+	}
+}
+#else /* !HAVE_IOKIT */
+#ifdef HAVE_LIBUSB_HOTPLUG_API
+static int _irecv_usb_hotplug_cb(libusb_context *ctx, libusb_device *device, libusb_hotplug_event event, void *user_data)
+{
+	if (!_irecv_is_recovery_device(device)) {
+		return 0;
+	}
+	if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED) {
+		THREAD_T th_device;
+		if (thread_new(&th_device, _irecv_handle_device_add, device) != 0) {
+			fprintf(stderr, "%s: FATAL: failed to create thread to handle device add\n", __func__);
+			return 0;
+		}
+		thread_detach(th_device);
+	} else if (event == LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT) {
+		uint8_t bus = libusb_get_bus_number(device);
+		uint8_t address = libusb_get_device_address(device);
+		uint32_t location = (bus << 16) | address;
+		FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+			if (devinfo->location == location) {
+				_irecv_handle_device_remove(devinfo);
+				break;
+			}
+		} ENDFOREACH
+	}
+
+	return 0;
+}
+#endif /* HAVE_LIBUSB_HOTPLUG_API */
+#endif /* !HAVE_IOKIT */
+#endif /* !WIN32 */
+
+static void *_irecv_event_handler(void* unused)
+{
+#ifdef WIN32
+	const GUID *guids[] = { &GUID_DEVINTERFACE_DFU, &GUID_DEVINTERFACE_IBOOT, NULL };
+	int running = 1;
+	do {
+		SP_DEVICE_INTERFACE_DATA currentInterface;
+		HDEVINFO usbDevices;
+		DWORD i;
+		int k;
+		for (k = 0; guids[k]; k++) {
+			usbDevices = SetupDiGetClassDevs(guids[k], NULL, NULL, DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+			if (!usbDevices) {
+				fprintf(stderr, "%s: ERROR: SetupDiGetClassDevs failed\n", __func__);
+				return NULL;
+			}
+
+			FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+				devinfo->alive = 0;
+			} ENDFOREACH
+
+			memset(&currentInterface, '\0', sizeof(SP_DEVICE_INTERFACE_DATA));
+			currentInterface.cbSize = sizeof(SP_DEVICE_INTERFACE_DATA);
+			for (i = 0; usbDevices && SetupDiEnumDeviceInterfaces(usbDevices, NULL, guids[k], i, &currentInterface); i++) {
+				DWORD requiredSize = 0;
+				PSP_DEVICE_INTERFACE_DETAIL_DATA details;
+				SetupDiGetDeviceInterfaceDetail(usbDevices, &currentInterface, NULL, 0, &requiredSize, NULL);
+				details = (PSP_DEVICE_INTERFACE_DETAIL_DATA) malloc(requiredSize);
+				details->cbSize = sizeof(SP_DEVICE_INTERFACE_DETAIL_DATA);
+				SP_DEVINFO_DATA devinfodata;
+				devinfodata.cbSize = sizeof(SP_DEVINFO_DATA);
+				if(!SetupDiGetDeviceInterfaceDetail(usbDevices, &currentInterface, details, requiredSize, NULL, &devinfodata)) {
+					free(details);
+					continue;
+				}
+
+				DWORD sz = REG_SZ;
+				char driver[256];
+				driver[0] = '\0';
+				if (!SetupDiGetDeviceRegistryProperty(usbDevices, &devinfodata, SPDRP_DRIVER, &sz, (PBYTE)driver, sizeof(driver), NULL)) {
+					fprintf(stderr, "%s: ERROR: Failed to get driver key\n", __func__);
+					free(details);
+					continue;
+				}
+				char *p = strrchr(driver, '\\');
+				if (!p) {
+					fprintf(stderr, "%s: ERROR: Failed to parse device location\n", __func__);
+					free(details);
+					continue;
+				}
+				uint32_t location = strtoul(p+1, NULL, 10);
+				int found = 0;
+
+				FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+					if (devinfo->location == location) {
+						devinfo->alive = 1;
+						found = 1;
+						break;
+					}
+				} ENDFOREACH
+
+				if (!found) {
+					struct irecv_win_dev_ctx win_ctx;
+					win_ctx.details = details;
+					win_ctx.location = location;
+					_irecv_handle_device_add(&win_ctx);
+				}
+				free(details);
+			}
+			SetupDiDestroyDeviceInfoList(usbDevices);
+		}
+
+		FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+			if (!devinfo->alive) {
+				_irecv_handle_device_remove(devinfo);
+			}
+		} ENDFOREACH
+
+		mutex_lock(&listener_mutex);
+		if (collection_count(&listeners) == 0) {
+			running = 0;
+		}
+		mutex_unlock(&listener_mutex);
+
+		Sleep(500);
+	} while (running);
+
+#else /* !WIN32 */
+#ifdef HAVE_IOKIT
+	kern_return_t kr;
+
+	IONotificationPortRef notifyPort = IONotificationPortCreate(kIOMasterPortDefault);
+	CFRunLoopSourceRef runLoopSource = IONotificationPortGetRunLoopSource(notifyPort);
+	iokit_runloop = CFRunLoopGetCurrent();
+	CFRunLoopAddSource(iokit_runloop, runLoopSource, kCFRunLoopDefaultMode);
+
+	uint16_t pids[7] = { IRECV_K_WTF_MODE, IRECV_K_DFU_MODE, IRECV_K_RECOVERY_MODE_1, IRECV_K_RECOVERY_MODE_2, IRECV_K_RECOVERY_MODE_3, IRECV_K_RECOVERY_MODE_4, 0 };
+	int i = 0;
+	while (pids[i] > 0) {
+		CFMutableDictionaryRef matchingDict = IOServiceMatching(kIOUSBDeviceClassName);
+		iokit_cfdictionary_set_short(matchingDict, CFSTR(kUSBVendorID), kAppleVendorID);
+		iokit_cfdictionary_set_short(matchingDict, CFSTR(kUSBProductID), pids[i]);
+
+		matchingDict = (CFMutableDictionaryRef)CFRetain(matchingDict);
+
+		io_iterator_t devAddedIter;
+		kr = IOServiceAddMatchingNotification(notifyPort, kIOFirstMatchNotification, matchingDict, iokit_device_added, NULL, &devAddedIter);
+		iokit_device_added(NULL, devAddedIter);
+
+		io_iterator_t devRemovedIter;
+		kr = IOServiceAddMatchingNotification(notifyPort, kIOTerminatedNotification, matchingDict, iokit_device_removed, NULL, &devRemovedIter);
+		iokit_device_removed(NULL, devRemovedIter);
+
+		i++;
+	}
+
+	CFRunLoopRun();
+
+#else /* !HAVE_IOKIT */
+#ifdef HAVE_LIBUSB_HOTPLUG_API
+	static libusb_hotplug_callback_handle usb_hotplug_cb_handle;
+	libusb_hotplug_register_callback(irecv_hotplug_ctx, LIBUSB_HOTPLUG_EVENT_DEVICE_ARRIVED | LIBUSB_HOTPLUG_EVENT_DEVICE_LEFT, LIBUSB_HOTPLUG_ENUMERATE, APPLE_VENDOR_ID, LIBUSB_HOTPLUG_MATCH_ANY, 0, _irecv_usb_hotplug_cb, NULL, &usb_hotplug_cb_handle);
+	int running = 1;
+	do {
+		struct timeval tv;
+		tv.tv_sec = tv.tv_usec = 0;
+		libusb_handle_events_timeout(irecv_hotplug_ctx, &tv);
+
+		mutex_lock(&listener_mutex);
+		if (collection_count(&listeners) == 0) {
+			running = 0;
+		}
+		mutex_unlock(&listener_mutex);
+
+		usleep(100000);
+	} while (running);
+	libusb_hotplug_deregister_callback(irecv_hotplug_ctx, usb_hotplug_cb_handle);
+#else /* !HAVE_LIBUSB_HOTPLUG_API */
+	int i, cnt;
+	libusb_device **devs;
+	int running = 1;
+
+	do {
+		cnt = libusb_get_device_list(irecv_hotplug_ctx, &devs);
+		if (cnt < 0) {
+			fprintf(stderr, "%s: FATAL: Failed to get device list: %s\n", __func__, libusb_error_name(cnt));
+			return NULL;
+		}
+
+		FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+			devinfo->alive = 0;
+		} ENDFOREACH
+
+		for (i = 0; i < cnt; i++) {
+			libusb_device *dev = devs[i];
+			if (!_irecv_is_recovery_device(dev)) {
+				continue;
+			}
+			uint8_t bus = libusb_get_bus_number(dev);
+			uint8_t address = libusb_get_device_address(dev);
+			uint32_t location = (bus << 16) | address;
+			int found = 0;
+			FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+				if (devinfo->location == location) {
+					devinfo->alive = 1;
+					found = 1;
+					break;
+				}
+			} ENDFOREACH
+			if (!found) {
+				_irecv_handle_device_add(dev);
+			}
+		}
+
+		FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+			if (!devinfo->alive) {
+				_irecv_handle_device_remove(devinfo);
+			}
+		} ENDFOREACH
+
+		libusb_free_device_list(devs, 1);
+
+		mutex_lock(&listener_mutex);
+		if (collection_count(&listeners) == 0) {
+			running = 0;
+		}
+		mutex_unlock(&listener_mutex);
+		if (!running)
+			break;
+		usleep(500000);
+	} while (running);
+#endif /* !HAVE_LIBUSB_HOTPLUG_API */
+#endif /* !HAVE_IOKIT */
+#endif /* !WIN32 */
+	return NULL;
+}
+#endif /* !USE_DUMMY */
+
+IRECV_API irecv_error_t irecv_device_event_subscribe(irecv_device_event_context_t *context, irecv_device_event_cb_t callback, void *user_data)
+{
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
+	if (!context || !callback)
+		return IRECV_E_INVALID_INPUT;
+
+	struct irecv_device_event_context* _context = malloc(sizeof(struct irecv_device_event_context));
+	if (!_context) {
+		return IRECV_E_OUT_OF_MEMORY;
+	}
+
+	_context->callback = callback;
+	_context->user_data = user_data;
+
+	mutex_lock(&listener_mutex);
+	collection_add(&listeners, _context);
+	mutex_unlock(&listener_mutex);
+
+	if (th_event_handler == THREAD_T_NULL || !thread_alive(th_event_handler)) {
+#ifndef WIN32
+#ifndef HAVE_IOKIT
+		libusb_init(&irecv_hotplug_ctx);
+#endif
+#endif
+		collection_init(&devices);
+		mutex_init(&device_mutex);
+		thread_new(&th_event_handler, _irecv_event_handler, NULL);
+	}
+
+	*context = _context;
+
+	return IRECV_E_SUCCESS;
+#endif
+}
+
+IRECV_API irecv_error_t irecv_device_event_unsubscribe(irecv_device_event_context_t context)
+{
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
+	if (!context)
+		return IRECV_E_INVALID_INPUT;
+
+	mutex_lock(&listener_mutex);
+	collection_remove(&listeners, context);
+	int num = collection_count(&listeners);
+	mutex_unlock(&listener_mutex);
+
+	if (num == 0) {
+#ifdef HAVE_IOKIT
+		if (iokit_runloop) {
+			CFRunLoopStop(iokit_runloop);
+		}
+#endif
+		thread_join(th_event_handler);
+		thread_free(th_event_handler);
+		th_event_handler = THREAD_T_NULL;
+		mutex_lock(&device_mutex);
+		FOREACH(struct irecv_usb_device_info *devinfo, &devices) {
+			free(devinfo->device_info.srnm);
+			devinfo->device_info.srnm = NULL;
+			free(devinfo->device_info.imei);
+			devinfo->device_info.imei = NULL;
+			free(devinfo->device_info.srtg);
+			devinfo->device_info.srtg = NULL;
+			free(devinfo->device_info.serial_string);
+			devinfo->device_info.serial_string = NULL;
+			free(devinfo);
+		} ENDFOREACH
+		collection_free(&devices);
+		mutex_unlock(&device_mutex);
+		mutex_destroy(&device_mutex);
+#ifndef WIN32
+#ifndef HAVE_IOKIT
+		libusb_exit(irecv_hotplug_ctx);
+		irecv_hotplug_ctx = NULL;
+#endif
+#endif
+	}
+
+	free(context);
+
+	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_close(irecv_client_t client) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (client != NULL) {
 		if(client->disconnected_callback != NULL) {
 			irecv_event_t event;
@@ -1537,46 +2375,45 @@ IRECV_API irecv_error_t irecv_close(irecv_client_t client) {
 		}
 #endif
 #else
-		if (client->iBootPath!=NULL) {
-			free(client->iBootPath);
-			client->iBootPath = NULL;
-		}
-		if (client->DfuPath!=NULL) {
-			free(client->DfuPath);
-			client->DfuPath = NULL;
-		}
+		free(client->iBootPath);
+		client->iBootPath = NULL;
+		free(client->DfuPath);
+		client->DfuPath = NULL;
 		mobiledevice_closepipes(client);
 #endif
-		if (client->device_info.srnm) {
-			free(client->device_info.srnm);
-		}
-		if (client->device_info.imei) {
-			free(client->device_info.imei);
-		}
-		if (client->device_info.ap_nonce) {
-			free(client->device_info.ap_nonce);
-		}
-		if (client->device_info.sep_nonce) {
-			free(client->device_info.sep_nonce);
-		}
+		free(client->device_info.srnm);
+		free(client->device_info.imei);
+		free(client->device_info.srtg);
+		free(client->device_info.serial_string);
+		free(client->device_info.ap_nonce);
+		free(client->device_info.sep_nonce);
+
 		free(client);
 		client = NULL;
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API void irecv_set_debug_level(int level) {
 	libirecovery_debug = level;
+#ifndef USE_DUMMY
 #ifndef WIN32
 #ifndef HAVE_IOKIT
 	if(libirecovery_context) {
+#if LIBUSB_API_VERSION >= 0x01000106
+		libusb_set_option(libirecovery_context, LIBUSB_OPTION_LOG_LEVEL, libirecovery_debug > 2 ? 1: 0);
+#else
 		libusb_set_debug(libirecovery_context, libirecovery_debug > 2 ? 1: 0);
+#endif
 	}
+#endif
 #endif
 #endif
 }
 
+#ifndef USE_DUMMY
 static irecv_error_t irecv_send_command_raw(irecv_client_t client, const char* command) {
 	unsigned int length = strlen(command);
 	if (length >= 0x100) {
@@ -1589,8 +2426,12 @@ static irecv_error_t irecv_send_command_raw(irecv_client_t client, const char* c
 
 	return IRECV_E_SUCCESS;
 }
+#endif
 
 IRECV_API irecv_error_t irecv_send_command(irecv_client_t client, const char* command) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	irecv_error_t error = 0;
 
 	if (check_context(client) != IRECV_E_SUCCESS)
@@ -1628,9 +2469,13 @@ IRECV_API irecv_error_t irecv_send_command(irecv_client_t client, const char* co
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_send_file(irecv_client_t client, const char* filename, int dfu_notify_finished) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
 
@@ -1663,8 +2508,10 @@ IRECV_API irecv_error_t irecv_send_file(irecv_client_t client, const char* filen
 	free(buffer);
 
 	return error;
+#endif
 }
 
+#ifndef USE_DUMMY
 static irecv_error_t irecv_get_status(irecv_client_t client, unsigned int* status) {
 	if (check_context(client) != IRECV_E_SUCCESS) {
 		*status = 0;
@@ -1682,8 +2529,12 @@ static irecv_error_t irecv_get_status(irecv_client_t client, unsigned int* statu
 
 	return IRECV_E_SUCCESS;
 }
+#endif
 
 IRECV_API irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, unsigned long length, int dfu_notify_finished) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	irecv_error_t error = 0;
 	int recovery_mode = ((client->mode != IRECV_K_DFU_MODE) && (client->mode != IRECV_K_WTF_MODE));
 
@@ -1746,20 +2597,31 @@ IRECV_API irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* 
 		} else {
 			int j;
 			for (j = 0; j < size; j++) {
-				dfu_hash_step(h1, buffer[i*packet_size + j]);
+				crc32_step(h1, buffer[i*packet_size + j]);
 			}
 			if (i+1 == packets) {
+				if (size+16 > packet_size) {
+					bytes = irecv_usb_control_transfer(client, 0x21, 1, i, 0, &buffer[i * packet_size], size, USB_TIMEOUT);
+					if (bytes != size) {
+						return IRECV_E_USB_UPLOAD;
+					}
+					count += size;
+					size = 0;
+				}
+
 				for (j = 0; j < 2; j++) {
-					dfu_hash_step(h1, dfu_xbuf[j*6 + 0]);
-					dfu_hash_step(h1, dfu_xbuf[j*6 + 1]);
-					dfu_hash_step(h1, dfu_xbuf[j*6 + 2]);
-					dfu_hash_step(h1, dfu_xbuf[j*6 + 3]);
-					dfu_hash_step(h1, dfu_xbuf[j*6 + 4]);
-					dfu_hash_step(h1, dfu_xbuf[j*6 + 5]);
+					crc32_step(h1, dfu_xbuf[j*6 + 0]);
+					crc32_step(h1, dfu_xbuf[j*6 + 1]);
+					crc32_step(h1, dfu_xbuf[j*6 + 2]);
+					crc32_step(h1, dfu_xbuf[j*6 + 3]);
+					crc32_step(h1, dfu_xbuf[j*6 + 4]);
+					crc32_step(h1, dfu_xbuf[j*6 + 5]);
 				}
 
 				char* newbuf = (char*)malloc(size + 16);
-				memcpy(newbuf, &buffer[i * packet_size], size);
+				if (size > 0) {
+					memcpy(newbuf, &buffer[i * packet_size], size);
+				}
 				memcpy(newbuf+size, dfu_xbuf, 12);
 				newbuf[size+12] = h1 & 0xFF;
 				newbuf[size+13] = (h1 >> 8) & 0xFF;
@@ -1788,7 +2650,7 @@ IRECV_API irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* 
 		if (!recovery_mode && status != 5) {
 			int retry = 0;
 
-			while (retry < 20) {
+			while (retry++ < 20) {
 				irecv_get_status(client, &status);
 				if (status == 5) {
 					break;
@@ -1833,9 +2695,13 @@ IRECV_API irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* 
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_receive(irecv_client_t client) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	char buffer[BUFFER_SIZE];
 	memset(buffer, '\0', BUFFER_SIZE);
 
@@ -1843,7 +2709,13 @@ IRECV_API irecv_error_t irecv_receive(irecv_client_t client) {
 		return IRECV_E_NO_DEVICE;
 
 	int bytes = 0;
-	while (irecv_usb_bulk_transfer(client, 0x81, (unsigned char*) buffer, BUFFER_SIZE, &bytes, 500) == 0) {
+	while (1) {
+		irecv_usb_set_interface(client, 1, 1);
+		int r = irecv_usb_bulk_transfer(client, 0x81, (unsigned char*) buffer, BUFFER_SIZE, &bytes, 500);
+		irecv_usb_set_interface(client, 0, 0);
+		if (r != 0) {
+			break;
+		}
 		if (bytes > 0) {
 			if (client->received_callback != NULL) {
 				irecv_event_t event;
@@ -1851,16 +2723,19 @@ IRECV_API irecv_error_t irecv_receive(irecv_client_t client) {
 				event.data = buffer;
 				event.type = IRECV_RECEIVED;
 				if (client->received_callback(client, &event) != 0) {
-					return IRECV_E_SUCCESS;
+					break;
 				}
 			}
 		} else break;
 	}
-
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_getenv(irecv_client_t client, const char* variable, char** value) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	char command[256];
 
 	if (check_context(client) != IRECV_E_SUCCESS)
@@ -1894,9 +2769,13 @@ IRECV_API irecv_error_t irecv_getenv(irecv_client_t client, const char* variable
 	*value = response;
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_getret(irecv_client_t client, unsigned int* value) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
 
@@ -1913,25 +2792,35 @@ IRECV_API irecv_error_t irecv_getret(irecv_client_t client, unsigned int* value)
 	*value = (unsigned int) *response;
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_get_mode(irecv_client_t client, int* mode) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
 
 	*mode = client->mode;
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API const struct irecv_device_info* irecv_get_device_info(irecv_client_t client)
 {
+#ifdef USE_DUMMY
+	return NULL;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return NULL;
 
 	return &client->device_info;
+#endif
 }
 
+#ifndef USE_DUMMY
 #ifdef HAVE_IOKIT
 static void *iokit_limera1n_usb_submit_request(void *argv) {
 	void **args = argv;
@@ -1945,8 +2834,12 @@ static void *iokit_limera1n_usb_submit_request(void *argv) {
 	return NULL;
 }
 #endif
+#endif
 
 IRECV_API irecv_error_t irecv_trigger_limera1n_exploit(irecv_client_t client) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
 
@@ -1991,9 +2884,13 @@ IRECV_API irecv_error_t irecv_trigger_limera1n_exploit(irecv_client_t client) {
 #endif
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_execute_script(irecv_client_t client, const char* script) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	irecv_error_t error = IRECV_E_SUCCESS;
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
@@ -2016,22 +2913,29 @@ IRECV_API irecv_error_t irecv_execute_script(irecv_client_t client, const char* 
 		line = strtok(NULL, "\n");
 	}
 
-	if (body)
-		free(body);
+	free(body);
 
 	return error;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_saveenv(irecv_client_t client) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	irecv_error_t error = irecv_send_command_raw(client, "saveenv");
 	if(error != IRECV_E_SUCCESS) {
 		return error;
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_setenv(irecv_client_t client, const char* variable, const char* value) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	char command[256];
 
 	if (check_context(client) != IRECV_E_SUCCESS)
@@ -2049,15 +2953,20 @@ IRECV_API irecv_error_t irecv_setenv(irecv_client_t client, const char* variable
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_reboot(irecv_client_t client) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	irecv_error_t error = irecv_send_command_raw(client, "reboot");
 	if(error != IRECV_E_SUCCESS) {
 		return error;
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API const char* irecv_strerror(irecv_error_t error) {
@@ -2098,6 +3007,9 @@ IRECV_API const char* irecv_strerror(irecv_error_t error) {
 	case IRECV_E_TIMEOUT:
 		return "Timeout talking to device";
 
+	case IRECV_E_UNSUPPORTED:
+		return "Operation unsupported by driver";
+
 	default:
 		return "Unknown error";
 	}
@@ -2106,6 +3018,9 @@ IRECV_API const char* irecv_strerror(irecv_error_t error) {
 }
 
 IRECV_API irecv_error_t irecv_reset_counters(irecv_client_t client) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	if (check_context(client) != IRECV_E_SUCCESS)
 		return IRECV_E_NO_DEVICE;
 
@@ -2114,9 +3029,13 @@ IRECV_API irecv_error_t irecv_reset_counters(irecv_client_t client) {
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_recv_buffer(irecv_client_t client, char* buffer, unsigned long length) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	int recovery_mode = ((client->mode != IRECV_K_DFU_MODE) && (client->mode != IRECV_K_WTF_MODE));
 
 	if (check_context(client) != IRECV_E_SUCCESS)
@@ -2156,9 +3075,13 @@ IRECV_API irecv_error_t irecv_recv_buffer(irecv_client_t client, char* buffer, u
 	}
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_finish_transfer(irecv_client_t client) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	int i = 0;
 	unsigned int status = 0;
 
@@ -2174,6 +3097,7 @@ IRECV_API irecv_error_t irecv_finish_transfer(irecv_client_t client) {
 	irecv_reset(client);
 
 	return IRECV_E_SUCCESS;
+#endif
 }
 
 IRECV_API irecv_device_t irecv_devices_get_all(void) {
@@ -2181,6 +3105,9 @@ IRECV_API irecv_device_t irecv_devices_get_all(void) {
 }
 
 IRECV_API irecv_error_t irecv_devices_get_device_by_client(irecv_client_t client, irecv_device_t* device) {
+#ifdef USE_DUMMY
+	return IRECV_E_UNSUPPORTED;
+#else
 	int i = 0;
 
 	*device = NULL;
@@ -2197,6 +3124,7 @@ IRECV_API irecv_error_t irecv_devices_get_device_by_client(irecv_client_t client
 	}
 
 	return IRECV_E_NO_DEVICE;
+#endif
 }
 
 IRECV_API irecv_error_t irecv_devices_get_device_by_product_type(const char* product_type, irecv_device_t* device) {
@@ -2236,9 +3164,17 @@ IRECV_API irecv_error_t irecv_devices_get_device_by_hardware_model(const char* h
 }
 
 IRECV_API irecv_client_t irecv_reconnect(irecv_client_t client, int initial_pause) {
+#ifdef USE_DUMMY
+	return NULL;
+#else
 	irecv_error_t error = 0;
 	irecv_client_t new_client = NULL;
 	irecv_event_cb_t progress_callback = client->progress_callback;
+	irecv_event_cb_t received_callback = client->received_callback;
+	irecv_event_cb_t connected_callback = client->connected_callback;
+	irecv_event_cb_t precommand_callback = client->precommand_callback;
+	irecv_event_cb_t postcommand_callback = client->postcommand_callback;
+	irecv_event_cb_t disconnected_callback = client->disconnected_callback;
 
 	unsigned long long ecid = client->device_info.ecid;
 
@@ -2250,13 +3186,28 @@ IRECV_API irecv_client_t irecv_reconnect(irecv_client_t client, int initial_paus
 		debug("Waiting %d seconds for the device to pop up...\n", initial_pause);
 		sleep(initial_pause);
 	}
-	
+
 	error = irecv_open_with_ecid_and_attempts(&new_client, ecid, 10);
 	if(error != IRECV_E_SUCCESS) {
 		return NULL;
 	}
 
 	new_client->progress_callback = progress_callback;
+	new_client->received_callback = received_callback;
+	new_client->connected_callback = connected_callback;
+	new_client->precommand_callback = precommand_callback;
+	new_client->postcommand_callback = postcommand_callback;
+	new_client->disconnected_callback = disconnected_callback;
+
+	if (new_client->connected_callback != NULL) {
+		irecv_event_t event;
+		event.size = 0;
+		event.data = NULL;
+		event.progress = 0;
+		event.type = IRECV_CONNECTED;
+		new_client->connected_callback(new_client, &event);
+	}
 
 	return new_client;
+#endif
 }
