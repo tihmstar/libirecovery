@@ -3103,7 +3103,7 @@ irecv_error_t irecv_device_event_unsubscribe(irecv_device_event_context_t contex
 #endif
 }
 
-irecv_error_t irecv_close(irecv_client_t client)
+irecv_error_t irecv_close_members(irecv_client_t client)
 {
 #ifdef USE_DUMMY
 	return IRECV_E_UNSUPPORTED;
@@ -3151,13 +3151,20 @@ irecv_error_t irecv_close(irecv_client_t client)
 		free(client->device_info.serial_string);
 		free(client->device_info.ap_nonce);
 		free(client->device_info.sep_nonce);
-
-		free(client);
-		client = NULL;
 	}
 
 	return IRECV_E_SUCCESS;
 #endif
+}
+
+irecv_error_t irecv_close(irecv_client_t client){
+	irecv_error_t ret = IRECV_E_SUCCESS;
+	if (client){
+		ret = irecv_close_members(client);
+		free(client);
+		client = NULL;
+	}
+	return ret;
 }
 
 void irecv_set_debug_level(int level)
@@ -3407,6 +3414,7 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 	irecv_error_t error = 0;
 	int recovery_mode = ((client->mode != IRECV_K_DFU_MODE) && (client->mode != IRECV_K_WTF_MODE));
 	int legacyiBootCommandSize = 0;
+	int isiOS2 = 0;
 
 	if (recovery_mode && client->device_info.cpid == 0x8900 && !client->device_info.ecid){
 			uint8_t buf[0x100] = {0x00, 0x00, 0x34, 0x12}; //ask how large commands should be
@@ -3424,6 +3432,8 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 				Also, to avoid false activation of this codepath, restrict it to the only two CPID which can run iOS 2
 			*/
 			recovery_mode = 0; //iOS 2 recovery mode works same as DFU mode
+			isiOS2 = 1;
+			dfu_notify_finished = 1;
 		}
 	}
 
@@ -3471,6 +3481,16 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 		case 2:
 			/* DFU IDLE */
 			break;
+
+		case 8:
+			/* DFU WAIT RESET */
+			if (!isiOS2){
+				debug("Unexpected state %d in non-iOS2 mode!, issuing ABORT\n", state);
+				irecv_usb_control_transfer(client, 0x21, 6, 0, 0, NULL, 0, USB_TIMEOUT);
+				error = IRECV_E_USB_UPLOAD;
+			}
+			break;			
+		
 		case 10:
 			debug("DFU ERROR, issuing CLRSTATUS\n");
 			irecv_usb_control_transfer(client, 0x21, 4, 0, 0, NULL, 0, USB_TIMEOUT);
@@ -3606,6 +3626,10 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 		}
 
 		irecv_reset(client);
+
+		if (isiOS2){
+			irecv_reconnect(client, 0);
+		}
 	}
 
 	if (legacyiBootCommandSize == sizeof(legacyCMD)){
@@ -4151,7 +4175,7 @@ irecv_client_t irecv_reconnect(irecv_client_t client, int initial_pause)
 	uint64_t ecid = client->device_info.ecid;
 
 	if (check_context(client) == IRECV_E_SUCCESS) {
-		irecv_close(client);
+		irecv_close_members(client);
 	}
 
 	if (initial_pause > 0) {
@@ -4170,6 +4194,11 @@ irecv_client_t irecv_reconnect(irecv_client_t client, int initial_pause)
 	new_client->precommand_callback = precommand_callback;
 	new_client->postcommand_callback = postcommand_callback;
 	new_client->disconnected_callback = disconnected_callback;
+
+	//keep old handle valid
+	memcpy(client, new_client, sizeof(*client));
+	free(new_client);
+	new_client = client;
 
 	if (new_client->connected_callback != NULL) {
 		irecv_event_t event;
