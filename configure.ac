@@ -59,7 +59,7 @@ case ${host_os} in
 			], [])
 		], [])
 	;;
-	mingw32*)
+	mingw32*|*msys*)
 		AC_MSG_RESULT([${host_os}])
 		GLOBAL_LDFLAGS+=" -static-libgcc -lkernel32 -lsetupapi"
 		win32=true
@@ -223,6 +223,7 @@ Configuration for $PACKAGE $VERSION:
 
   Install prefix: .........: $prefix
   USB backend: ............: $USB_BACKEND
+  with tools: .............: $with_tools
 
   Now type 'make' to build $PACKAGE $VERSION,
   and then 'make install' for installation.

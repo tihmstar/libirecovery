@@ -37,3 +37,6 @@ udev/39-libirecovery.rules
 .idea
 .vscode
 .DS_Store
+cache_wrkdir
+*_buildroot
+*_buildroot_deps

@@ -728,6 +728,7 @@ static void irecv_load_device_info_from_iboot_string(irecv_client_t client, cons
 	ptr = strstr(iboot_string, "CPID:");
 	if (ptr != NULL) {
 		sscanf(ptr, "CPID:%x", &client->device_info.cpid);
+		client->device_info.have_cpid = 1;
 	}else{
 		//early iOS 1 doesn't identify itself
 		client->device_info.cpid = 0x8900;
@@ -736,31 +737,37 @@ static void irecv_load_device_info_from_iboot_string(irecv_client_t client, cons
 	ptr = strstr(iboot_string, "CPRV:");
 	if (ptr != NULL) {
 		sscanf(ptr, "CPRV:%x", &client->device_info.cprv);
+		client->device_info.have_cprv = 1;
 	}
 
 	ptr = strstr(iboot_string, "CPFM:");
 	if (ptr != NULL) {
 		sscanf(ptr, "CPFM:%x", &client->device_info.cpfm);
+		client->device_info.have_cpfm = 1;
 	}
 
 	ptr = strstr(iboot_string, "SCEP:");
 	if (ptr != NULL) {
 		sscanf(ptr, "SCEP:%x", &client->device_info.scep);
+		client->device_info.have_scep = 1;
 	}
 
 	ptr = strstr(iboot_string, "BDID:");
 	if (ptr != NULL) {
 		sscanf(ptr, "BDID:%x", &client->device_info.bdid);
+		client->device_info.have_bdid = 1;
 	}
 
 	ptr = strstr(iboot_string, "ECID:");
 	if (ptr != NULL) {
 		sscanf(ptr, "ECID:%" SCNx64, &client->device_info.ecid);
+		client->device_info.have_ecid = 1;
 	}
 
 	ptr = strstr(iboot_string, "IBFL:");
 	if (ptr != NULL) {
 		sscanf(ptr, "IBFL:%x", &client->device_info.ibfl);
+		client->device_info.have_ibfl = 1;
 	}
 
 	char tmp[256];
@@ -3407,6 +3414,17 @@ irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, un
 			if ((error = irecv_usb_interrupt_transfer(client, 0x04, &buf[0], 4, &bytes))) return error;
 			if ((error = irecv_usb_interrupt_transfer(client, 0x83, &buf[0], sizeof(buf), &bytes))) return error;
 			legacyiBootCommandSize = bytes;
+	}
+
+	if (recovery_mode && legacyiBootCommandSize == 0){
+		//we are in recovery mode and we are not dealing with iOS 1.x
+		if ((client->device_info.cpid == 0x8900 || client->device_info.cpid == 0x8720) && !client->device_info.have_ibfl){
+			/*
+				iOS 2.x doesn't have IBFL tag, but iOS 3 does
+				Also, to avoid false activation of this codepath, restrict it to the only two CPID which can run iOS 2
+			*/
+			recovery_mode = 0; //iOS 2 recovery mode works same as DFU mode
+		}
 	}
 
 	if (check_context(client) != IRECV_E_SUCCESS)
