@@ -542,7 +542,7 @@ typedef struct {
 #define MSG_REJECT          0x809
 	uint16_t magic;	//always 0x1234
 	uint32_t size;
-	uint32_t type;	//0x00 for commands, 0x09000000 for files
+	uint32_t loadaddr;	//0x00 for commands, 0x09000000 for files
 } legacyCMD;
 
 #pragma pack()
