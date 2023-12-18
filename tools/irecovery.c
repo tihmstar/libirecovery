@@ -339,20 +339,22 @@ int postcommand_cb(irecv_client_t client, const irecv_event_t* event)
 	if (event->type == IRECV_POSTCOMMAND) {
 		command = strdup(event->data);
 		action = strtok(command, " ");
-		if (!strcmp(action, "getenv")) {
-			argument = strtok(NULL, " ");
-			error = irecv_getenv(client, argument, &value);
-			if (error != IRECV_E_SUCCESS) {
-				debug("%s\n", irecv_strerror(error));
-				free(command);
-				return error;
+		if (action){
+			if (!strcmp(action, "getenv")) {
+				argument = strtok(NULL, " ");
+				error = irecv_getenv(client, argument, &value);
+				if (error != IRECV_E_SUCCESS) {
+					debug("%s\n", irecv_strerror(error));
+					free(command);
+					return error;
+				}
+				printf("%s\n", value);
+				free(value);
 			}
-			printf("%s\n", value);
-			free(value);
-		}
 
-		if (!strcmp(action, "reboot")) {
-			quit = 1;
+			if (!strcmp(action, "reboot")) {
+				quit = 1;
+			}
 		}
 	}
 
