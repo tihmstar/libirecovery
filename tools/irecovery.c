@@ -90,6 +90,9 @@ static const char* mode_to_str(int mode)
 		case IRECV_K_DFU_MODE:
 			return "DFU";
 			break;
+		case IRECV_K_PORT_DFU_MODE:
+			return "Port DFU";
+			break;
 		case IRECV_K_WTF_MODE:
 			return "WTF";
 			break;
@@ -179,7 +182,14 @@ static void print_device_info(irecv_client_t client)
 
 	ret = irecv_get_mode(client, &mode);
 	if (ret == IRECV_E_SUCCESS) {
-		printf("MODE: %s\n", mode_to_str(mode));
+		switch (devinfo->pid) {
+			case 0x1881:
+				printf("MODE: DFU via Debug USB (KIS)\n");
+				break;
+			default:
+				printf("MODE: %s\n", mode_to_str(mode));
+				break;
+		}
 	}
 
 	irecv_devices_get_device_by_client(client, &device);
@@ -577,6 +587,8 @@ int main(int argc, char* argv[])
 	if (device)
 		debug("Connected to %s, model %s, cpid 0x%04x, bdid 0x%02x\n", device->product_type, device->hardware_model, device->chip_id, device->board_id);
 
+	const struct irecv_device_info *devinfo = irecv_get_device_info(client);
+
 	switch (action) {
 		case kResetDevice:
 			irecv_reset(client);
@@ -584,11 +596,15 @@ int main(int argc, char* argv[])
 
 		case kSendFile:
 			irecv_event_subscribe(client, IRECV_PROGRESS, &progress_cb, NULL);
-			error = irecv_send_file(client, argument, 1);
+			error = irecv_send_file(client, argument, IRECV_SEND_OPT_DFU_NOTIFY_FINISH);
 			debug("%s\n", irecv_strerror(error));
 			break;
 
 		case kSendCommand:
+			if (devinfo->pid == 0x1881) {
+				printf("Shell is not available in Debug USB (KIS) mode.\n");
+				break;
+			}
 			if (_is_breq_command(argument)) {
 				error = irecv_send_command_breq(client, argument, 1);
 			} else {
@@ -598,6 +614,10 @@ int main(int argc, char* argv[])
 			break;
 
 		case kSendExploit:
+			if (devinfo->pid == 0x1881) {
+				printf("Shell is not available in Debug USB (KIS) mode.\n");
+				break;
+			}
 			if (argument != NULL) {
 				irecv_event_subscribe(client, IRECV_PROGRESS, &progress_cb, NULL);
 				error = irecv_send_file(client, argument, 0);
@@ -611,10 +631,18 @@ int main(int argc, char* argv[])
 			break;
 
 		case kStartShell:
+			if (devinfo->pid == 0x1881) {
+				printf("This feature is not supported in Debug USB (KIS) mode.\n");
+				break;
+			}
 			init_shell(client);
 			break;
 
 		case kSendScript:
+			if (devinfo->pid == 0x1881) {
+				printf("This feature is not supported in Debug USB (KIS) mode.\n");
+				break;
+			}
 			buffer_read_from_filename(argument, &buffer, &buffer_length);
 			if (buffer) {
 				buffer[buffer_length] = '\0';
@@ -630,12 +658,20 @@ int main(int argc, char* argv[])
 			}
 			break;
 
-		case kShowMode:
+		case kShowMode: {
 			irecv_get_mode(client, &mode);
-			printf("%s Mode\n", mode_to_str(mode));
+			printf("%s Mode", mode_to_str(mode));
+			if (devinfo->pid == 0x1881) {
+				printf(" via Debug USB (KIS)");
+			}
+			printf("\n");
 			break;
-
+		}
 		case kRebootToNormalMode:
+			if (devinfo->pid == 0x1881) {
+				printf("This feature is not supported in Debug USB (KIS) mode.\n");
+				break;
+			}
 			error = irecv_setenv(client, "auto-boot", "true");
 			if (error != IRECV_E_SUCCESS) {
 				debug("%s\n", irecv_strerror(error));

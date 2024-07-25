@@ -15,11 +15,11 @@ dnl libtool versioning
 #                 changes to the signature and the semantic)
 #  ? :+1 : ?   == just internal changes
 # CURRENT : REVISION : AGE
-LIBIRECOVERY_SO_VERSION=4:0:1
+LIBIRECOVERY_SO_VERSION=5:0:0
 
 dnl Minimum package versions
 LIBUSB_VERSION=1.0.3
-LIMD_GLUE_VERSION=1.0.0
+LIMD_GLUE_VERSION=1.2.0
 
 AC_SUBST(LIBIRECOVERY_SO_VERSION)
 AC_SUBST(LIMD_GLUE_VERSION)
@@ -141,13 +141,13 @@ AS_IF([test "x$with_dummy" = "xyes"], [
 ])
 
 AS_COMPILER_FLAGS(GLOBAL_CFLAGS, "-Wall -Wextra -Wmissing-declarations -Wredundant-decls -Wshadow -Wpointer-arith -Wwrite-strings -Wswitch-default -Wno-unused-parameter -fvisibility=hidden")
+
+if test "x$enable_static" = "xyes" -a "x$enable_shared" = "xno"; then
+	GLOBAL_CFLAGS+=" -DIRECV_STATIC"
+fi
+
 AC_SUBST(GLOBAL_CFLAGS)
 AC_SUBST(GLOBAL_LDFLAGS)
-
-case "$GLOBAL_CFLAGS" in
-	*-fvisibility=hidden*)
-		AC_DEFINE([HAVE_FVISIBILITY], [1], [Define if compiled with -fvisibility=hidden])
-esac
 
 # check for large file support
 AC_SYS_LARGEFILE
@@ -211,6 +211,7 @@ AC_CONFIG_FILES([
 Makefile
 src/Makefile
 src/libirecovery-1.0.pc
+udev/39-libirecovery.rules
 include/Makefile
 tools/Makefile
 udev/Makefile

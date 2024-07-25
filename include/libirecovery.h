@@ -27,17 +27,11 @@ extern "C" {
 
 #include <stdint.h>
 
-#ifdef IRECV_STATIC
-  #define IRECV_API
-#elif defined(_WIN32)
-  #ifdef DLL_EXPORT
-    #define IRECV_API __declspec(dllexport)
-  #else
+#ifndef IRECV_API
+  #ifdef IRECV_STATIC
+    #define IRECV_API
+  #elif defined(_WIN32)
     #define IRECV_API __declspec(dllimport)
-  #endif
-#else
-  #if __GNUC__ >= 4
-    #define IRECV_API __attribute__((visibility("default")))
   #else
     #define IRECV_API
   #endif
@@ -49,7 +43,8 @@ enum irecv_mode {
 	IRECV_K_RECOVERY_MODE_3   = 0x1282,
 	IRECV_K_RECOVERY_MODE_4   = 0x1283,
 	IRECV_K_WTF_MODE          = 0x1222,
-	IRECV_K_DFU_MODE          = 0x1227
+	IRECV_K_DFU_MODE          = 0x1227,
+	IRECV_K_PORT_DFU_MODE     = 0xf014
 };
 
 typedef enum {
@@ -119,6 +114,7 @@ struct irecv_device_info {
 	unsigned int ap_nonce_size;
 	unsigned char* sep_nonce;
 	unsigned int sep_nonce_size;
+	uint16_t pid;
 };
 
 typedef enum {
@@ -135,11 +131,20 @@ typedef struct {
 typedef struct irecv_client_private irecv_client_private;
 typedef irecv_client_private* irecv_client_t;
 
+enum {
+	IRECV_SEND_OPT_NONE              = 0,
+	IRECV_SEND_OPT_DFU_NOTIFY_FINISH = (1 << 0),
+	IRECV_SEND_OPT_DFU_FORCE_ZLP     = (1 << 1),
+	IRECV_SEND_OPT_DFU_SMALL_PKT     = (1 << 2)
+};
+
 /* library */
 IRECV_API void irecv_set_debug_level(int level);
 IRECV_API const char* irecv_strerror(irecv_error_t error);
 IRECV_API void irecv_init(void); /* deprecated: libirecovery has constructor now */
 IRECV_API void irecv_exit(void); /* deprecated: libirecovery has destructor now */
+
+IRECV_API const char* irecv_version();
 
 /* device connectivity */
 IRECV_API irecv_error_t irecv_open_with_ecid(irecv_client_t* client, uint64_t ecid);
@@ -172,10 +177,10 @@ IRECV_API irecv_error_t irecv_event_subscribe(irecv_client_t client, irecv_event
 IRECV_API irecv_error_t irecv_event_unsubscribe(irecv_client_t client, irecv_event_type type);
 
 /* I/O */
-IRECV_API irecv_error_t irecv_send_file(irecv_client_t client, const char* filename, int dfu_notify_finished);
+IRECV_API irecv_error_t irecv_send_file(irecv_client_t client, const char* filename, unsigned int options);
 IRECV_API irecv_error_t irecv_send_command(irecv_client_t client, const char* command);
 IRECV_API irecv_error_t irecv_send_command_breq(irecv_client_t client, const char* command, uint8_t b_request);
-IRECV_API irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, unsigned long length, int dfu_notify_finished);
+IRECV_API irecv_error_t irecv_send_buffer(irecv_client_t client, unsigned char* buffer, unsigned long length, unsigned int options);
 IRECV_API irecv_error_t irecv_recv_buffer(irecv_client_t client, char* buffer, unsigned long length);
 
 /* commands */
