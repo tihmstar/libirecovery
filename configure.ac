@@ -15,7 +15,7 @@ dnl libtool versioning
 #                 changes to the signature and the semantic)
 #  ? :+1 : ?   == just internal changes
 # CURRENT : REVISION : AGE
-LIBIRECOVERY_SO_VERSION=5:0:0
+LIBIRECOVERY_SO_VERSION=6:2:1
 
 dnl Minimum package versions
 LIBUSB_VERSION=1.0.3
@@ -77,35 +77,21 @@ case ${host_os} in
 esac
 AM_CONDITIONAL(WIN32, test x$win32 = xtrue)
 
-# Check if the C compiler supports __attribute__((constructor))
-AC_CACHE_CHECK([wether the C compiler supports constructor/destructor attributes],
-  ac_cv_attribute_constructor, [
-  ac_cv_attribute_constructor=no
-  AC_COMPILE_IFELSE([AC_LANG_PROGRAM(
-    [[
-      static void __attribute__((constructor)) test_constructor(void) {
-      }
-      static void __attribute__((destructor)) test_destructor(void) {
-      }
-    ]], [])],
-    [ac_cv_attribute_constructor=yes]
-  )]
-)
-if test "$ac_cv_attribute_constructor" = "yes"; then
-  AC_DEFINE(HAVE_ATTRIBUTE_CONSTRUCTOR, 1, [Define if the C compiler supports constructor/destructor attributes])
-fi
-
 AC_ARG_WITH([tools],
-	[AS_HELP_STRING([--with-tools], [Build irecovery tools. (requires readline) [default=yes]])],
+	[AS_HELP_STRING([--with-tools], [Build irecovery tools. [default=yes]])],
 	[],
 	[with_tools=yes])
 
+have_readline=no
 AS_IF([test "x$with_tools" = "xyes"], [
 	AC_DEFINE(BUILD_TOOLS, 1, [Define if we are building irecovery tools])
-	AC_CHECK_HEADERS([readline/readline.h], [],
-		[AC_MSG_ERROR([Please install readline development headers])]
-	)]
-)
+	AC_CHECK_HEADERS([readline/readline.h],
+		[AC_DEFINE(HAVE_READLINE, 1, [Define if readline is available])
+		have_readline=yes],
+		[AC_MSG_NOTICE([NOTE: Building without readline support. If you want readline support, install its development package.])]
+	)
+])
+AM_CONDITIONAL(HAVE_READLINE, test "x$have_readline" = "xyes")
 AM_CONDITIONAL(BUILD_TOOLS, test "x$with_tools" = "xyes")
 
 AC_ARG_WITH([dummy],
@@ -139,6 +125,10 @@ AS_IF([test "x$with_dummy" = "xyes"], [
 		])
 	])
 ])
+
+if test "x$win32" = "xtrue"; then
+  AC_DEFINE(_WIN32, 1, [Define if we are building for windows])
+fi
 
 AS_COMPILER_FLAGS(GLOBAL_CFLAGS, "-Wall -Wextra -Wmissing-declarations -Wredundant-decls -Wshadow -Wpointer-arith -Wwrite-strings -Wswitch-default -Wno-unused-parameter -fvisibility=hidden")
 
@@ -224,7 +214,7 @@ Configuration for $PACKAGE $VERSION:
 
   Install prefix: .........: $prefix
   USB backend: ............: $USB_BACKEND
-  with tools: .............: $with_tools
+  Build tools: ............: $with_tools
 
   Now type 'make' to build $PACKAGE $VERSION,
   and then 'make install' for installation.

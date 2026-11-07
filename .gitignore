@@ -10,6 +10,7 @@ m4/*
 *.dll
 *.so
 *.dylib
+*.exe
 *.patch
 aclocal.m4
 config.h
@@ -40,3 +41,4 @@ udev/39-libirecovery.rules
 cache_wrkdir
 *_buildroot
 *_buildroot_deps
+*.exe
